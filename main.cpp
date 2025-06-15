@@ -1,198 +1,366 @@
-#include <iostream>
-#include <vector>
+#include "imgui.h"
+#include "imgui_impl_sdl2.h"
+#include "imgui_impl_opengl3.h"
+#include <cstdio>
+#include <SDL.h>
+#include <SDL_opengl.h>
 #include <string>
-#include <filesystem>
-#include <atomic>
-#include <mutex>
 #include <vector>
-
-#include <SDL2/SDL.h>
-#include <SDL2/SDL_opengl.h>
-
-#include "imgui/imgui.h"
-#include "imgui/backends/imgui_impl_sdl2.h"
-#include "imgui/backends/imgui_impl_opengl3.h"
+#include <filesystem>
+#include <set>
+#include <algorithm> 
+#include <cctype>    
 
 #define MINIAUDIO_IMPLEMENTATION
-#include "miniaudio/miniaudio.h"
+#include "miniaudio.h"
 
-namespace fs = std::filesystem;
-
-struct AudioState {
-    ma_decoder* pDecoder = nullptr;
-    std::vector<fs::path> playlist;
-    int current_song_index = -1;
-    std::atomic<ma_uint64> cursor_frames = 0;
-    ma_uint64 total_frames = 0;
+// ======== Data Structures ========
+struct Song {
+    std::string filePath;
+    std::string displayName;
 };
 
-AudioState g_audio_state;
-std::mutex g_audio_mutex;
-ma_device g_device;
-std::atomic<bool> g_device_inited = false;
-float g_volume = 1.0f; // 全局音量
+// REFACTOR: Enhance AudioState with a stopwatch mechanism for progress tracking.
+struct AudioState {
+    ma_decoder decoder;
+    ma_device device;
+    ma_mutex mutex;
+
+    bool isAudioReady = false;
+    bool isDeviceInitialized = false;
+    std::string currentFilePath = "";
+
+    // Stopwatch state for performance
+    float totalSongDurationSec = 0.0f;
+    Uint32 songStartTime = 0;       // SDL_GetTicks() when play started/resumed
+    float elapsedTimeAtPause = 0.0f;
+};
+
+// ======== Audio Functions ========
 
 void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
-    std::lock_guard<std::mutex> lock(g_audio_mutex);
-    if (g_audio_state.pDecoder == nullptr) {
-        memset(pOutput, 0, frameCount * pDevice->playback.channels * ma_get_bytes_per_sample(pDevice->playback.format));
-        return;
+    AudioState* audioState = (AudioState*)pDevice->pUserData;
+    if (audioState == NULL) return;
+
+    ma_mutex_lock(&audioState->mutex);
+    if (audioState->isAudioReady) {
+        ma_decoder_read_pcm_frames(&audioState->decoder, pOutput, frameCount, NULL);
     }
-    ma_uint64 framesRead;
-    ma_decoder_read_pcm_frames(g_audio_state.pDecoder, pOutput, frameCount, &framesRead);
-    g_audio_state.cursor_frames.fetch_add(framesRead);
+    ma_mutex_unlock(&audioState->mutex);
+    
+    (void)pInput;
 }
 
-void load_song(int song_index) {
-    if (g_device_inited) ma_device_stop(&g_device);
-    ma_decoder* pOldDecoder = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(g_audio_mutex);
-        pOldDecoder = g_audio_state.pDecoder;
-        g_audio_state.pDecoder = nullptr;
-        g_audio_state.current_song_index = -1;
-        g_audio_state.cursor_frames = 0;
-        g_audio_state.total_frames = 0;
+bool PlaySong(AudioState& audioState, const char* filePath) {
+    if (audioState.isDeviceInitialized) {
+        ma_device_uninit(&audioState.device);
+        audioState.isDeviceInitialized = false;
     }
-    if (pOldDecoder) { ma_decoder_uninit(pOldDecoder); delete pOldDecoder; }
-    if (song_index < 0 || song_index >= g_audio_state.playlist.size()) return;
 
-    ma_decoder* pNewDecoder = new ma_decoder;
-    const char* filepath = g_audio_state.playlist[song_index].c_str();
-    if (ma_decoder_init_file(filepath, NULL, pNewDecoder) != MA_SUCCESS) { delete pNewDecoder; return; }
-    {
-        std::lock_guard<std::mutex> lock(g_audio_mutex);
-        g_audio_state.pDecoder = pNewDecoder;
-        g_audio_state.current_song_index = song_index;
-        ma_decoder_get_length_in_pcm_frames(g_audio_state.pDecoder, &g_audio_state.total_frames);
+    ma_mutex_lock(&audioState.mutex);
+    if (audioState.isAudioReady) {
+        ma_decoder_uninit(&audioState.decoder);
     }
-    if (g_device_inited) ma_device_start(&g_device);
-}
 
-void scan_music_directory(const std::string& path) {
-    try {
-        for (const auto& entry : fs::directory_iterator(path)) {
-            if (entry.is_regular_file()) {
-                std::string ext = entry.path().extension().string();
-                if (ext == ".mp3" || ext == ".MP3") g_audio_state.playlist.push_back(fs::absolute(entry.path()));
-            }
-        }
-    } catch (const fs::filesystem_error& e) { std::cerr << "Filesystem error: " << e.what() << std::endl; }
-}
+    ma_result result = ma_decoder_init_file(filePath, NULL, &audioState.decoder);
+    if (result != MA_SUCCESS) {
+        printf("Could not load file: %s\n", filePath);
+        audioState.isAudioReady = false;
+        audioState.currentFilePath = "";
+        ma_mutex_unlock(&audioState.mutex);
+        return false;
+    }
+    
+    // Calculate total duration once at the beginning. This can be slow for VBR but it's a one-time cost.
+    ma_uint64 totalFrames;
+    ma_decoder_get_length_in_pcm_frames(&audioState.decoder, &totalFrames);
+    audioState.totalSongDurationSec = (totalFrames > 0) ? (float)totalFrames / audioState.decoder.outputSampleRate : 0.0f;
 
-int main(int argc, char* argv[]) {
-    scan_music_directory("./music");
+    audioState.isAudioReady = true;
+    audioState.currentFilePath = filePath;
+    ma_mutex_unlock(&audioState.mutex);
 
     ma_device_config deviceConfig = ma_device_config_init(ma_device_type_playback);
-    deviceConfig.playback.format = ma_format_f32; deviceConfig.playback.channels = 2; deviceConfig.sampleRate = 48000;
+    deviceConfig.performanceProfile = ma_performance_profile_conservative;
+    deviceConfig.playback.format = audioState.decoder.outputFormat;
+    deviceConfig.playback.channels = audioState.decoder.outputChannels;
+    deviceConfig.sampleRate = audioState.decoder.outputSampleRate;
     deviceConfig.dataCallback = data_callback;
-    if (ma_device_init(NULL, &deviceConfig, &g_device) == MA_SUCCESS) {
-        ma_device_set_master_volume(&g_device, g_volume);
-        g_device_inited = true;
-    } else { std::cerr << "Failed to initialize audio device." << std::endl; }
+    deviceConfig.pUserData = &audioState;
+
+    if (ma_device_init(NULL, &deviceConfig, &audioState.device) != MA_SUCCESS) {
+        printf("Failed to open playback device.\n");
+        return false;
+    }
+    audioState.isDeviceInitialized = true;
+
+    if (ma_device_start(&audioState.device) != MA_SUCCESS) {
+        printf("Failed to start playback device.\n");
+        ma_device_uninit(&audioState.device);
+        audioState.isDeviceInitialized = false;
+        return false;
+    }
     
-    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER);
-    SDL_Window* window = SDL_CreateWindow("MP3 Player", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 800, 600, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
-    SDL_GLContext gl_context = SDL_GL_CreateContext(window);
-    IMGUI_CHECKVERSION(); ImGui::CreateContext(); ImGui_ImplSDL2_InitForOpenGL(window, gl_context); ImGui_ImplOpenGL3_Init("#version 330");
+    // Reset stopwatch on new song
+    audioState.elapsedTimeAtPause = 0.0f;
+    audioState.songStartTime = SDL_GetTicks();
 
-    bool quit = false;
-    while (!quit) {
-        SDL_Event e;
-        while (SDL_PollEvent(&e)) { ImGui_ImplSDL2_ProcessEvent(&e); if (e.type == SDL_QUIT) quit = true; }
+    printf("Playing: %s\n", filePath);
+    return true;
+}
 
-        ImGui_ImplOpenGL3_NewFrame(); ImGui_ImplSDL2_NewFrame(); ImGui::NewFrame();
-        
-        ImGui::Begin("MP3 Player");
-        
-        ImGui::BeginChild("Playlist", ImVec2(ImGui::GetContentRegionAvail().x * 0.4f, 0), true);
-        for (int i = 0; i < g_audio_state.playlist.size(); ++i) {
-            if (ImGui::Selectable(g_audio_state.playlist[i].filename().c_str(), g_audio_state.current_song_index == i)) {
-                load_song(i);
-            }
-        }
-        ImGui::EndChild();
-        ImGui::SameLine();
+// ======== UI & Utility Functions ========
 
-        ImGui::BeginChild("Controls", ImVec2(0, 0));
-        
-        // --- 元数据和进度信息 ---
-        std::string current_song_text = "No song loaded";
-        if (g_audio_state.current_song_index != -1) {
-            current_song_text = g_audio_state.playlist[g_audio_state.current_song_index].filename().string();
-        }
-        ImGui::Text("%s", current_song_text.c_str());
+void SetModernDarkStyle() {
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.WindowRounding = 5.0f;
+    style.FrameRounding = 4.0f;
+    style.GrabRounding = 4.0f;
+    style.PopupRounding = 4.0f;
+    style.ScrollbarRounding = 4.0f;
+    style.TabRounding = 4.0f;
+    ImGui::StyleColorsDark();
+}
 
-        float progress = 0.0f;
-        ma_uint64 cursor = g_audio_state.cursor_frames.load();
-        ma_uint64 length = g_audio_state.total_frames;
-        if (length > 0) progress = (float)cursor / (float)length;
+void ScanDirectoryForMusic(const std::string& path, std::vector<Song>& playlist) {
+    const std::set<std::string> supported_extensions = {".mp3", ".wav", ".flac"};
+    try {
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(path)) {
+            if (entry.is_regular_file()) {
+                std::string extension = entry.path().extension().string();
+                std::transform(extension.begin(), extension.end(), extension.begin(),
+                   [](unsigned char c){ return std::tolower(c); });
 
-        // --- 可拖动进度条 ---
-        if (ImGui::SliderFloat("##Progress", &progress, 0.0f, 1.0f)) {
-            if (g_audio_state.current_song_index != -1) {
-                std::lock_guard<std::mutex> lock(g_audio_mutex);
-                if (g_audio_state.pDecoder) { // 再次检查以防万一
-                    ma_uint64 new_cursor_pos = (ma_uint64)(progress * g_audio_state.total_frames);
-                    ma_decoder_seek_to_pcm_frame(g_audio_state.pDecoder, new_cursor_pos);
-                    g_audio_state.cursor_frames.store(new_cursor_pos); // 同步原子游标
+                if (supported_extensions.count(extension)) {
+                    std::string full_path = entry.path().string();
+                    auto it = std::find_if(playlist.begin(), playlist.end(), 
+                                           [&](const Song& s){ return s.filePath == full_path; });
+                    if (it == playlist.end()) {
+                        playlist.push_back({full_path, entry.path().filename().string()});
+                    }
                 }
             }
         }
+    } catch (const std::filesystem::filesystem_error& e) {
+        printf("Filesystem error: %s\n", e.what());
+    }
+}
 
-        // --- 自动播放下一首 ---
-        if (g_audio_state.current_song_index != -1 && cursor >= length && length > 0) {
-            load_song(g_audio_state.current_song_index + 1);
+void ShowPlayerWindow(AudioState& audioState, float& volume, float progress, const std::string& songName, ImVec2 pos, ImVec2 size);
+void ShowPlaylistWindow(AudioState& audioState, std::vector<Song>& playlist, ImVec2 pos, ImVec2 size);
+
+
+// ======== Main Application ========
+int main(int, char**) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_GAMECONTROLLER) != 0) {
+        printf("Error: %s\n", SDL_GetError());
+        return -1;
+    }
+
+    const char* glsl_version = "#version 130";
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, 0);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+    SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+    SDL_Window* window = SDL_CreateWindow("MP3 Player", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720, window_flags);
+    SDL_GLContext gl_context = SDL_GL_CreateContext(window);
+    SDL_GL_MakeCurrent(window, gl_context);
+    SDL_GL_SetSwapInterval(1); // Enable VSync
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+
+    SetModernDarkStyle();
+    ImGui_ImplSDL2_InitForOpenGL(window, gl_context);
+    ImGui_ImplOpenGL3_Init(glsl_version);
+    
+    AudioState audioState;
+    if (ma_mutex_init(&audioState.mutex) != MA_SUCCESS) {
+        printf("Failed to initialize mutex.\n");
+        return -1;
+    }
+    float volume = 0.5f;
+    std::vector<Song> playlist;
+
+    // Cache for UI state
+    float display_progress = 0.0f;
+    std::string display_song_name = "No song loaded.";
+
+    bool done = false;
+    while (!done) {
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            ImGui_ImplSDL2_ProcessEvent(&event);
+            if (event.type == SDL_QUIT) done = true;
+            if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE && event.window.windowID == SDL_GetWindowID(window)) done = true;
         }
 
-        bool is_playing = g_device_inited && ma_device_get_state(&g_device) == ma_device_state_started;
-        bool song_loaded = g_audio_state.current_song_index != -1;
-        
-        auto switch_song = [&](int direction) {
-            int next_index = (direction == 0) ? 0 : g_audio_state.current_song_index + direction;
-            load_song(next_index);
-        };
-
-        if (ImGui::Button("<< Prev")) { switch_song(-1); } ImGui::SameLine();
-        if (is_playing) {
-            if (ImGui::Button("Pause")) { if (g_device_inited) ma_device_stop(&g_device); }
+        // --- UI State Update using Stopwatch ---
+        bool isPlaying = audioState.isDeviceInitialized && ma_device_is_started(&audioState.device);
+        if (audioState.isAudioReady) {
+            display_song_name = std::filesystem::path(audioState.currentFilePath).filename().string();
+            if (isPlaying) {
+                float currentSessionTime = (float)(SDL_GetTicks() - audioState.songStartTime) / 1000.0f;
+                float totalElapsedTime = audioState.elapsedTimeAtPause + currentSessionTime;
+                display_progress = (audioState.totalSongDurationSec > 0) ? (totalElapsedTime / audioState.totalSongDurationSec) : 0.0f;
+            } else { // Paused
+                display_progress = (audioState.totalSongDurationSec > 0) ? (audioState.elapsedTimeAtPause / audioState.totalSongDurationSec) : 0.0f;
+            }
+             if(display_progress >= 1.0f) display_progress = 1.0f; // Cap at 100%
         } else {
-            if (ImGui::Button("Play ")) {
-                if (song_loaded && g_device_inited) { ma_device_start(&g_device); }
-                else if (!song_loaded && !g_audio_state.playlist.empty()) { switch_song(0); }
-            }
+            display_song_name = "No song loaded.";
+            display_progress = 0.0f;
         }
-        ImGui::SameLine();
-        if (ImGui::Button("Stop ")) {
-            if (g_device_inited) ma_device_stop(&g_device);
-            load_song(-1);
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Next >>")) { switch_song(1); }
         
-        ImGui::Dummy(ImVec2(0, 20.0f)); // 增加一些垂直间距
+        // --- Start ImGui Frame ---
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui_ImplSDL2_NewFrame();
+        ImGui::NewFrame();
 
-        // --- 音量控制 ---
-        if (ImGui::SliderFloat("Volume", &g_volume, 0.0f, 1.0f)) {
-            if (g_device_inited) {
-                ma_device_set_master_volume(&g_device, g_volume);
-            }
+        if (audioState.isDeviceInitialized) {
+            ma_device_set_master_volume(&audioState.device, volume);
         }
 
-        ImGui::EndChild();
-        ImGui::End();
+        const ImGuiViewport* viewport = ImGui::GetMainViewport();
+        const float playerHeight = 110.0f;
+        ImVec2 playerPos = ImVec2(viewport->Pos.x, viewport->Pos.y + viewport->Size.y - playerHeight);
+        ImVec2 playerSize = ImVec2(viewport->Size.x, playerHeight);
+        ImVec2 playlistPos = viewport->Pos;
+        ImVec2 playlistSize = ImVec2(viewport->Size.x, viewport->Size.y - playerHeight);
+
+        ShowPlaylistWindow(audioState, playlist, playlistPos, playlistSize);
+        ShowPlayerWindow(audioState, volume, display_progress, display_song_name, playerPos, playerSize);
 
         ImGui::Render();
-        glViewport(0, 0, (int)ImGui::GetIO().DisplaySize.x, (int)ImGui::GetIO().DisplaySize.y);
-        glClearColor(0.1f, 0.12f, 0.14f, 1.0f); glClear(GL_COLOR_BUFFER_BIT);
+        glViewport(0, 0, (int)io.DisplaySize.x, (int)io.DisplaySize.y);
+        glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         SDL_GL_SwapWindow(window);
     }
 
-    if (g_device_inited) ma_device_uninit(&g_device);
-    if (g_audio_state.pDecoder) { ma_decoder_uninit(g_audio_state.pDecoder); delete g_audio_state.pDecoder; }
-    
-    ImGui_ImplOpenGL3_Shutdown(); ImGui_ImplSDL2_Shutdown(); ImGui::DestroyContext();
-    SDL_GL_DeleteContext(gl_context); SDL_DestroyWindow(window); SDL_Quit();
+    // Cleanup
+    if (audioState.isDeviceInitialized) {
+        ma_device_uninit(&audioState.device);
+    }
+    ma_mutex_lock(&audioState.mutex);
+    if (audioState.isAudioReady) {
+        ma_decoder_uninit(&audioState.decoder);
+    }
+    ma_mutex_unlock(&audioState.mutex);
+    ma_mutex_uninit(&audioState.mutex);
+
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplSDL2_Shutdown();
+    ImGui::DestroyContext();
+    SDL_GL_DeleteContext(gl_context);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+
     return 0;
+}
+
+void ShowPlayerWindow(AudioState& audioState, float& volume, float progress, const std::string& songName, ImVec2 pos, ImVec2 size) {
+    ImGui::SetNextWindowPos(pos);
+    ImGui::SetNextWindowSize(size);
+    ImGuiWindowFlags player_flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse;
+
+    ImGui::Begin("Player", nullptr, player_flags);
+    
+    ImGui::Text("Now Playing:");
+    ImGui::TextWrapped("%s", songName.c_str());
+    
+    ImGui::ProgressBar(progress, ImVec2(-1.0f, 0.0f));
+
+    if (ImGui::Button("<< Prev")) { /* TODO */ }
+    ImGui::SameLine();
+
+    bool isPlaying = audioState.isDeviceInitialized && ma_device_is_started(&audioState.device);
+    if (isPlaying) {
+        if (ImGui::Button("Pause")) { 
+            ma_device_stop(&audioState.device);
+            // Record elapsed time when pausing
+            float sessionTime = (float)(SDL_GetTicks() - audioState.songStartTime) / 1000.0f;
+            audioState.elapsedTimeAtPause += sessionTime;
+        }
+    } else {
+        if (ImGui::Button("Play ")) {
+            if(audioState.isDeviceInitialized) {
+                ma_device_start(&audioState.device);
+                // Reset stopwatch start time on resume
+                audioState.songStartTime = SDL_GetTicks();
+            }
+        }
+    }
+
+    ImGui::SameLine();
+    if (ImGui::Button("Next >>")) { /* TODO */ }
+    ImGui::SameLine();
+    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
+    ImGui::SliderFloat("##Volume", &volume, 0.0f, 1.0f, "Volume: %.2f");
+    ImGui::PopItemWidth();
+
+    ImGui::End();
+}
+
+void ShowPlaylistWindow(AudioState& audioState, std::vector<Song>& playlist, ImVec2 pos, ImVec2 size) {
+    ImGui::SetNextWindowPos(pos);
+    ImGui::SetNextWindowSize(size);
+    ImGuiWindowFlags playlist_flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse;
+    
+    ImGui::Begin("Playlist", nullptr, playlist_flags);
+
+    static char folder_path_buf[1024] = "/home/user/Music";
+    ImGui::InputText("Folder Path", folder_path_buf, sizeof(folder_path_buf));
+    ImGui::SameLine();
+    if (ImGui::Button("Scan Folder")) {
+        ScanDirectoryForMusic(folder_path_buf, playlist);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Clear")) {
+        playlist.clear();
+    }
+    
+    ImGui::Separator();
+
+    ma_mutex_lock(&audioState.mutex);
+    std::string current_song_path = audioState.currentFilePath;
+    ma_mutex_unlock(&audioState.mutex);
+
+    if (ImGui::BeginTable("playlist_table", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable)) {
+        ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableSetupColumn("Title");
+        ImGui::TableHeadersRow();
+        
+        ImGuiListClipper clipper;
+        clipper.Begin(playlist.size());
+        while (clipper.Step()) {
+            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::Text("%d", i + 1);
+                ImGui::TableSetColumnIndex(1);
+                
+                const Song& song = playlist[i];
+                bool is_selected = (current_song_path == song.filePath);
+
+                if (ImGui::Selectable(song.displayName.c_str(), is_selected, ImGuiSelectableFlags_SpanAllColumns)) {
+                }
+                if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                    PlaySong(audioState, song.filePath.c_str());
+                }
+            }
+        }
+        clipper.End();
+
+        ImGui::EndTable();
+    }
+
+    ImGui::End();
 }
