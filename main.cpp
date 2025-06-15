@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <atomic>
 #include <mutex>
+#include <vector>
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_opengl.h>
@@ -29,6 +30,7 @@ AudioState g_audio_state;
 std::mutex g_audio_mutex;
 ma_device g_device;
 std::atomic<bool> g_device_inited = false;
+float g_volume = 1.0f; // 全局音量
 
 void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
     std::lock_guard<std::mutex> lock(g_audio_mutex);
@@ -84,17 +86,13 @@ int main(int argc, char* argv[]) {
     ma_device_config deviceConfig = ma_device_config_init(ma_device_type_playback);
     deviceConfig.playback.format = ma_format_f32; deviceConfig.playback.channels = 2; deviceConfig.sampleRate = 48000;
     deviceConfig.dataCallback = data_callback;
-    if (ma_device_init(NULL, &deviceConfig, &g_device) == MA_SUCCESS) g_device_inited = true;
-    else std::cerr << "Failed to initialize audio device." << std::endl;
-
+    if (ma_device_init(NULL, &deviceConfig, &g_device) == MA_SUCCESS) {
+        ma_device_set_master_volume(&g_device, g_volume);
+        g_device_inited = true;
+    } else { std::cerr << "Failed to initialize audio device." << std::endl; }
+    
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
-    
-    // --- 核心修正行 ---
     SDL_Window* window = SDL_CreateWindow("MP3 Player", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 800, 600, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
-    
     SDL_GLContext gl_context = SDL_GL_CreateContext(window);
     IMGUI_CHECKVERSION(); ImGui::CreateContext(); ImGui_ImplSDL2_InitForOpenGL(window, gl_context); ImGui_ImplOpenGL3_Init("#version 330");
 
@@ -107,20 +105,42 @@ int main(int argc, char* argv[]) {
         
         ImGui::Begin("MP3 Player");
         
-        ImGui::BeginChild("Playlist", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() * 3));
+        ImGui::BeginChild("Playlist", ImVec2(ImGui::GetContentRegionAvail().x * 0.4f, 0), true);
         for (int i = 0; i < g_audio_state.playlist.size(); ++i) {
             if (ImGui::Selectable(g_audio_state.playlist[i].filename().c_str(), g_audio_state.current_song_index == i)) {
                 load_song(i);
             }
         }
         ImGui::EndChild();
+        ImGui::SameLine();
+
+        ImGui::BeginChild("Controls", ImVec2(0, 0));
+        
+        // --- 元数据和进度信息 ---
+        std::string current_song_text = "No song loaded";
+        if (g_audio_state.current_song_index != -1) {
+            current_song_text = g_audio_state.playlist[g_audio_state.current_song_index].filename().string();
+        }
+        ImGui::Text("%s", current_song_text.c_str());
 
         float progress = 0.0f;
         ma_uint64 cursor = g_audio_state.cursor_frames.load();
         ma_uint64 length = g_audio_state.total_frames;
         if (length > 0) progress = (float)cursor / (float)length;
-        ImGui::ProgressBar(progress);
-        
+
+        // --- 可拖动进度条 ---
+        if (ImGui::SliderFloat("##Progress", &progress, 0.0f, 1.0f)) {
+            if (g_audio_state.current_song_index != -1) {
+                std::lock_guard<std::mutex> lock(g_audio_mutex);
+                if (g_audio_state.pDecoder) { // 再次检查以防万一
+                    ma_uint64 new_cursor_pos = (ma_uint64)(progress * g_audio_state.total_frames);
+                    ma_decoder_seek_to_pcm_frame(g_audio_state.pDecoder, new_cursor_pos);
+                    g_audio_state.cursor_frames.store(new_cursor_pos); // 同步原子游标
+                }
+            }
+        }
+
+        // --- 自动播放下一首 ---
         if (g_audio_state.current_song_index != -1 && cursor >= length && length > 0) {
             load_song(g_audio_state.current_song_index + 1);
         }
@@ -150,6 +170,16 @@ int main(int argc, char* argv[]) {
         ImGui::SameLine();
         if (ImGui::Button("Next >>")) { switch_song(1); }
         
+        ImGui::Dummy(ImVec2(0, 20.0f)); // 增加一些垂直间距
+
+        // --- 音量控制 ---
+        if (ImGui::SliderFloat("Volume", &g_volume, 0.0f, 1.0f)) {
+            if (g_device_inited) {
+                ma_device_set_master_volume(&g_device, g_volume);
+            }
+        }
+
+        ImGui::EndChild();
         ImGui::End();
 
         ImGui::Render();
