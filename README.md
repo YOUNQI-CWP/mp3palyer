@@ -2,10 +2,13 @@
 
 这是一个基于 C++、SDL2、OpenGL 和 Dear ImGui 构建的简单音乐播放器。
 
+<<<<<<< HEAD
 ## 视频演示
 
 ![演示视频](https://imgcdn.youngqi.cn/video/music-player.mp4)
 
+=======
+>>>>>>> d417881683f34d0eb3eab80788f280c4dcd223a0
 ## 目录
 
 - [项目环境依赖配置](#项目环境依赖配置)
