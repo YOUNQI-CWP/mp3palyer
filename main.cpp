@@ -20,7 +20,6 @@
 // ======== Enums & Data Structures ========
 enum class PlayMode { ListLoop, RepeatOne, Shuffle };
 enum class ActiveView { Main, LikedSongs };
-// MODIFICATION: 新增枚举，用于区分播放行为是全新播放还是在历史记录中导航
 enum class PlayDirection { New, Back };
 
 struct Song {
@@ -41,8 +40,6 @@ struct AudioState {
 
     PlayMode playMode = PlayMode::ListLoop;
     
-    // MODIFICATION: 移除 shuffleIndices 和 currentShuffleIndex
-    // MODIFICATION: 新增播放历史记录
     std::vector<int> playHistory;
 
     float totalSongDurationSec = 0.0f;
@@ -51,7 +48,6 @@ struct AudioState {
 };
 
 // ======== Forward Declarations ========
-// MODIFICATION: PlaySongAtIndex 签名已更改
 bool PlaySongAtIndex(AudioState& audioState, std::vector<Song>& playlist, int index, PlayDirection direction = PlayDirection::New);
 void ShowLeftSidebar(ImVec2 pos, ImVec2 size, ActiveView& currentView);
 void ShowPlayerWindow(AudioState& audioState, std::vector<Song>& mainPlaylist, std::vector<Song>& activePlaylist, float& volume, float progress, ImVec2 pos, ImVec2 size);
@@ -62,6 +58,7 @@ int GetNextSongIndex(AudioState& audioState, int listSize);
 // ======== Audio, Config & Logic Functions ========
 
 void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
+    // 在这个回调函数中，pUserData 是一个指针，所以使用 -> 是正确的
     AudioState* audioState = (AudioState*)pDevice->pUserData;
     if (audioState == NULL) return;
     ma_mutex_lock(&audioState->mutex);
@@ -72,9 +69,6 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
     (void)pInput;
 }
 
-// MODIFICATION: 移除 GenerateShuffleIndices 函数
-
-// MODIFICATION: 新增一个辅助函数，用于获取一个与当前歌曲不同的随机索引
 int GetNewRandomIndex(int current, int listSize) {
     if (listSize <= 1) return 0;
     std::random_device rd;
@@ -83,7 +77,7 @@ int GetNewRandomIndex(int current, int listSize) {
     int nextIndex;
     do {
         nextIndex = distrib(gen);
-    } while (nextIndex == current); // 确保不会随机到当前正在播放的歌曲
+    } while (nextIndex == current);
     return nextIndex;
 }
 
@@ -94,7 +88,6 @@ int GetNextSongIndex(AudioState& audioState, int listSize) {
     switch (audioState.playMode) {
         case PlayMode::RepeatOne:
             return audioState.currentIndex;
-        // MODIFICATION: 随机模式下，总是获取一个新的随机索引
         case PlayMode::Shuffle:
             return GetNewRandomIndex(audioState.currentIndex, listSize);
         case PlayMode::ListLoop:
@@ -103,24 +96,22 @@ int GetNextSongIndex(AudioState& audioState, int listSize) {
     }
 }
 
-// MODIFICATION: PlaySongAtIndex 签名和逻辑已更新，以处理播放历史
 bool PlaySongAtIndex(AudioState& audioState, std::vector<Song>& playlist, int index, PlayDirection direction) {
     if (playlist.empty() || index < 0 || index >= playlist.size()) {
         return false;
     }
 
-    // --- 历史记录管理 ---
-    // 如果是新的播放指令 (非 "上一首" )，并且当前有歌曲在播放，则将当前歌曲加入历史记录
     if (direction == PlayDirection::New && audioState.currentIndex != -1) {
         audioState.playHistory.push_back(audioState.currentIndex);
     }
-    // --- 历史记录管理结束 ---
-
 
     const char* filePath = playlist[index].filePath.c_str();
     if (audioState.isDeviceInitialized) ma_device_uninit(&audioState.device);
 
+    // audioState 是一个引用 (reference)，不是指针 (pointer)。
+    // 访问它的成员变量 mutex 必须使用点号 '.'，而不是箭头 '->'。
     ma_mutex_lock(&audioState.mutex);
+    
     if (audioState.isAudioReady) ma_decoder_uninit(&audioState.decoder);
 
     ma_result result = ma_decoder_init_file(filePath, NULL, &audioState.decoder);
@@ -136,8 +127,7 @@ bool PlaySongAtIndex(AudioState& audioState, std::vector<Song>& playlist, int in
     audioState.totalSongDurationSec = (totalFrames > 0) ? (float)totalFrames / audioState.decoder.outputSampleRate : 0.0f;
     audioState.isAudioReady = true;
     audioState.currentFilePath = filePath;
-    audioState.currentIndex = index; // 更新当前播放索引
-    ma_mutex_unlock(&audioState.mutex);
+    audioState.currentIndex = index;
 
     ma_device_config deviceConfig = ma_device_config_init(ma_device_type_playback);
     deviceConfig.performanceProfile = ma_performance_profile_conservative;
@@ -146,7 +136,13 @@ bool PlaySongAtIndex(AudioState& audioState, std::vector<Song>& playlist, int in
     deviceConfig.sampleRate = audioState.decoder.outputSampleRate;
     deviceConfig.dataCallback = data_callback;
     deviceConfig.pUserData = &audioState;
-    if (ma_device_init(NULL, &deviceConfig, &audioState.device) != MA_SUCCESS) return false;
+
+    // 解锁，因为 ma_device_init 可能需要时间
+    ma_mutex_unlock(&audioState.mutex);
+
+    if (ma_device_init(NULL, &deviceConfig, &audioState.device) != MA_SUCCESS) {
+        return false;
+    }
 
     audioState.isDeviceInitialized = true;
     if (ma_device_start(&audioState.device) != MA_SUCCESS) return false;
@@ -312,7 +308,6 @@ int main(int, char**) {
             if (display_progress >= 1.0f && isPlaying) {
                 std::vector<Song>& activePlaylist = (currentView == ActiveView::Main) ? mainPlaylist : likedSongsPlaylist;
                 int nextIndex = GetNextSongIndex(audioState, activePlaylist.size());
-                // MODIFICATION: 自动播放下一首是新播放指令
                 PlaySongAtIndex(audioState, activePlaylist, nextIndex, PlayDirection::New);
             }
         } else {
@@ -370,24 +365,25 @@ void ShowLeftSidebar(ImVec2 pos, ImVec2 size, ActiveView& currentView) {
     ImGui::SetNextWindowPos(pos);
     ImGui::SetNextWindowSize(size);
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse;
+    
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::Begin("Sidebar", nullptr, flags);
-    ImGui::PopStyleVar();
 
     if (ImGui::Selectable(u8"主列表", currentView == ActiveView::Main)) { currentView = ActiveView::Main; }
     if (ImGui::Selectable(u8"我喜欢的音乐", currentView == ActiveView::LikedSongs)) { currentView = ActiveView::LikedSongs; }
-
+    
     ImGui::End();
+    ImGui::PopStyleVar();
 }
 
 void ShowPlayerWindow(AudioState& audioState, std::vector<Song>& mainPlaylist, std::vector<Song>& activePlaylist, float& volume, float progress, ImVec2 pos, ImVec2 size) {
     ImGui::SetNextWindowPos(pos);
     ImGui::SetNextWindowSize(size);
     ImGuiWindowFlags player_flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse;
+
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::Begin("Player", nullptr, player_flags);
-    ImGui::PopStyleVar();
-
+    
     std::string songName = "No Song Loaded";
     Song* currentSongInMain = nullptr;
 
@@ -406,6 +402,8 @@ void ShowPlayerWindow(AudioState& audioState, std::vector<Song>& mainPlaylist, s
     ImGui::BeginGroup();
     {
         float artSize = size.y * 0.8f;
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + artSize, p.y + artSize), IM_COL32(40, 40, 40, 255));
         ImGui::Dummy(ImVec2(artSize, artSize));
     }
     ImGui::EndGroup();
@@ -449,25 +447,20 @@ void ShowPlayerWindow(AudioState& audioState, std::vector<Song>& mainPlaylist, s
     ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (ImGui::GetContentRegionAvail().x - controls_width - 150) / 2);
     ImGui::BeginGroup();
     {
-        // ==================== PREVIOUS BUTTON LOGIC START ====================
         if (ImGui::Button("<<")) {
-            // 优先从播放历史中获取上一首歌
             if (!audioState.playHistory.empty()) {
                 int prevIndex = audioState.playHistory.back();
                 audioState.playHistory.pop_back();
                 PlaySongAtIndex(audioState, activePlaylist, prevIndex, PlayDirection::Back);
             }
-            // 如果历史为空，并且是随机模式，则随机播放一首新歌
             else if (audioState.playMode == PlayMode::Shuffle && !activePlaylist.empty()) {
                 PlaySongAtIndex(audioState, activePlaylist, GetNextSongIndex(audioState, activePlaylist.size()), PlayDirection::New);
             }
-            // 如果历史为空，在非随机模式下，按列表顺序播放上一首
             else if (!activePlaylist.empty()) {
                 int prevIndex = (audioState.currentIndex - 1 + activePlaylist.size()) % activePlaylist.size();
                 PlaySongAtIndex(audioState, activePlaylist, prevIndex, PlayDirection::New);
             }
         }
-        // ==================== PREVIOUS BUTTON LOGIC END ====================
 
         ImGui::SameLine();
         bool isPlaying = audioState.isDeviceInitialized && ma_device_is_started(&audioState.device);
@@ -482,14 +475,11 @@ void ShowPlayerWindow(AudioState& audioState, std::vector<Song>& mainPlaylist, s
         }
         ImGui::SameLine();
 
-        // ==================== NEXT BUTTON LOGIC START ====================
         if (ImGui::Button(">>")) {
             if (!activePlaylist.empty()) {
-                // 直接使用 GetNextSongIndex 获取下一首，该函数已包含随机模式的处理
                 PlaySongAtIndex(audioState, activePlaylist, GetNextSongIndex(audioState, activePlaylist.size()), PlayDirection::New);
             }
         }
-        // ==================== NEXT BUTTON LOGIC END ====================
 
         ImGui::SameLine();
         const char* modeText = "";
@@ -501,7 +491,6 @@ void ShowPlayerWindow(AudioState& audioState, std::vector<Song>& mainPlaylist, s
         if (ImGui::Button(modeText)) {
             int currentMode = (int)audioState.playMode;
             audioState.playMode = (PlayMode)((currentMode + 1) % 3);
-            // MODIFICATION: 切换模式时清空播放历史，避免模式混淆
             audioState.playHistory.clear();
         }
     }
@@ -514,15 +503,16 @@ void ShowPlayerWindow(AudioState& audioState, std::vector<Song>& mainPlaylist, s
     ImGui::PopItemWidth();
 
     ImGui::End();
+    ImGui::PopStyleVar();
 }
 
 void ShowPlaylistWindow(AudioState& audioState, std::vector<Song>& mainPlaylist, std::vector<Song>& likedPlaylist, std::vector<std::string>& musicDirs, ActiveView currentView, ImVec2 pos, ImVec2 size) {
     ImGui::SetNextWindowPos(pos);
     ImGui::SetNextWindowSize(size);
     ImGuiWindowFlags playlist_flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse;
+    
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::Begin("Playlist", nullptr, playlist_flags);
-    ImGui::PopStyleVar();
 
     if (currentView == ActiveView::Main) {
         ImGui::BeginChild("DirManagement", ImVec2(0, 150), true);
@@ -571,10 +561,13 @@ void ShowPlaylistWindow(AudioState& audioState, std::vector<Song>& mainPlaylist,
     }
 
     ImGui::Text(u8"播放列表");
-    if (ImGui::BeginTable("playlist_table", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable)) {
+    // ==================== MODIFICATION START ====================
+    // 1. 将表格列数从 3 改为 2
+    if (ImGui::BeginTable("playlist_table", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable)) {
         ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoResize, 40.0f);
         ImGui::TableSetupColumn(u8"标题");
-        ImGui::TableSetupColumn(u8"♡", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoResize, 40.0f);
+        // 2. 移除爱心图标列的设置
+        // ImGui::TableSetupColumn(u8"♡", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoResize, 40.0f);
         ImGui::TableHeadersRow();
 
         ImGuiListClipper clipper;
@@ -591,25 +584,28 @@ void ShowPlaylistWindow(AudioState& audioState, std::vector<Song>& mainPlaylist,
 
                 if (ImGui::Selectable(song.displayName.c_str(), is_selected, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick)) {
                     if (ImGui::IsMouseDoubleClicked(0)) {
-                        // MODIFICATION: 从播放列表直接点播也是新播放指令，会清空历史
                         PlaySongAtIndex(audioState, activePlaylist, i, PlayDirection::New);
                     }
                 }
-
-                ImGui::TableSetColumnIndex(2);
-                const char* heartIcon = song.isLiked ? u8"♥" : u8"♡";
-                ImGui::PushID(i);
-                if (ImGui::Button(heartIcon)) {
-                    song.isLiked = !song.isLiked;
-                    auto it = std::find_if(mainPlaylist.begin(), mainPlaylist.end(), [&](const Song& s){ return s.filePath == song.filePath; });
-                    if (it != mainPlaylist.end()) it->isLiked = song.isLiked;
-                    SaveLikedSongs(mainPlaylist);
-                }
-                ImGui::PopID();
+                
+                // 3. 移除渲染爱心图标按钮的整块代码
+                // ImGui::TableSetColumnIndex(2);
+                // const char* heartIcon = song.isLiked ? u8"♥" : u8"♡";
+                // ImGui::PushID(i);
+                // if (ImGui::Button(heartIcon)) {
+                //     song.isLiked = !song.isLiked;
+                //     auto it = std::find_if(mainPlaylist.begin(), mainPlaylist.end(), [&](const Song& s){ return s.filePath == song.filePath; });
+                //     if (it != mainPlaylist.end()) it->isLiked = song.isLiked;
+                //     SaveLikedSongs(mainPlaylist);
+                // }
+                // ImGui::PopID();
             }
         }
         clipper.End();
         ImGui::EndTable();
     }
+    // ==================== MODIFICATION END ====================
+    
     ImGui::End();
+    ImGui::PopStyleVar();
 }
