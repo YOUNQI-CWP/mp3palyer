@@ -26,15 +26,12 @@ enum class PlayMode { ListLoop, RepeatOne, Shuffle };
 enum class ActiveView { Main, LikedSongs };
 enum class PlayDirection { New, Back };
 
-// ==================== MODIFICATION: ADD METADATA FIELDS ====================
 struct Song {
     std::string filePath;
     std::string displayName;
-    std::string artist; // 新增：艺术家
-    std::string album;  // 新增：专辑
+    std::string artist;
     bool isLiked = false;
 };
-// =========================================================================
 
 struct AudioState {
     ma_decoder decoder;
@@ -215,7 +212,7 @@ void SetModernDarkStyle() {
     ImGui::StyleColorsDark();
 }
 
-// ==================== MODIFICATION: PARSE METADATA FROM FILENAME ====================
+// ==================== CHANGE HERE: Restored Robust Parsing Logic ====================
 void ScanDirectoryForMusic(const std::string& path, std::vector<Song>& playlist, const std::set<std::string>& likedPaths) {
     const std::set<std::string> supported_extensions = {".mp3", ".wav", ".flac"};
     try {
@@ -233,33 +230,26 @@ void ScanDirectoryForMusic(const std::string& path, std::vector<Song>& playlist,
                         newSong.filePath = full_path;
                         newSong.isLiked = likedPaths.count(full_path);
 
-                        // --- 从文件名解析元数据 ---
-                        std::string filename = entry.path().stem().string(); // 获取不带扩展名的文件名
+                        // --- 从文件名解析元数据 (恢复健壮的解析，但忽略专辑) ---
+                        std::string filename = entry.path().stem().string();
                         std::stringstream ss(filename);
                         std::string segment;
                         std::vector<std::string> segments;
                         while(std::getline(ss, segment, '-')) {
                             // Trim whitespace
-                            size_t first = segment.find_first_not_of(' ');
+                            size_t first = segment.find_first_not_of(" \t\n\r");
                             if (std::string::npos == first) continue;
-                            size_t last = segment.find_last_not_of(' ');
+                            size_t last = segment.find_last_not_of(" \t\n\r");
                             segments.push_back(segment.substr(first, (last - first + 1)));
                         }
 
-                        if (segments.size() >= 2) { // 格式: Artist - Title
+                        if (segments.size() >= 2) { // 格式: Artist - Title (忽略后面的部分)
                             newSong.artist = segments[0];
                             newSong.displayName = segments[1];
-                            newSong.album = "未知专辑"; // 默认
-                            if (segments.size() >= 3) { // 格式: Artist - Album - Title
-                                newSong.album = segments[1];
-                                newSong.displayName = segments[2];
-                            }
                         } else { // 无法解析
                             newSong.displayName = filename;
                             newSong.artist = "未知艺术家";
-                            newSong.album = "未知专辑";
-                        }
-                        
+                        }                       
                         playlist.push_back(newSong);
                     }
                 }
@@ -417,7 +407,6 @@ void ShowLeftSidebar(ImVec2 pos, ImVec2 size, ActiveView& currentView) {
     ImGui::PopStyleVar();
 }
 
-// ==================== MODIFICATION: ENTIRE ShowPlayerWindow FUNCTION REVAMPED ====================
 void ShowPlayerWindow(AudioState& audioState, std::vector<Song>& mainPlaylist, std::vector<Song>& activePlaylist, float& volume, float progress, ImVec2 pos, ImVec2 size) {
     ImGui::SetNextWindowPos(pos);
     ImGui::SetNextWindowSize(size);
@@ -443,7 +432,6 @@ void ShowPlayerWindow(AudioState& audioState, std::vector<Song>& mainPlaylist, s
             
             ImGui::SameLine(0, 10.0f);
 
-            // 垂直居中对齐歌曲信息
             float infoHeight = (G_Font_Large ? G_Font_Large->FontSize : 18.0f) + (G_Font_Default ? G_Font_Default->FontSize : 18.0f) + ImGui::GetStyle().ItemSpacing.y;
             float infoOffsetY = (artSize - infoHeight) / 2.0f;
             ImGui::SetCursorPosY(ImGui::GetCursorPosY() + infoOffsetY);
@@ -455,14 +443,14 @@ void ShowPlayerWindow(AudioState& audioState, std::vector<Song>& mainPlaylist, s
                 if (G_Font_Large) ImGui::PopFont();
                 
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
-                ImGui::Text("%s - %s", currentSongInActive->artist.c_str(), currentSongInActive->album.c_str());
+                ImGui::Text("%s", currentSongInActive->artist.c_str());
                 ImGui::PopStyleColor();
             } else {
                 if (G_Font_Large) ImGui::PushFont(G_Font_Large);
                 ImGui::Text("No Song Loaded");
                 if (G_Font_Large) ImGui::PopFont();
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
-                ImGui::Text("Unknown Artist - Unknown Album");
+                ImGui::Text("Unknown Artist");
                 ImGui::PopStyleColor();
             }
             ImGui::EndGroup();
