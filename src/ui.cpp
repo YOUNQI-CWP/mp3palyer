@@ -1,3 +1,12 @@
+/**
+ * @file ui.cpp
+ * @brief 处理用户界面渲染和交互的实现文件。
+ *
+ * 该文件包含了设置ImGui风格、显示左侧边栏、
+ * 播放器窗口和播放列表窗口的功能。
+ * 它负责管理UI布局、用户输入和显示应用程序状态。
+ */
+
 #include "ui.h"
 #include "audio.h"
 #include "files.h"
@@ -5,6 +14,12 @@
 #include <cstring>
 #include <algorithm>
 
+/**
+ * @brief 设置应用程序的ImGui风格为现代暗色风格。
+ *
+ * 配置窗口内边距、框架内边距、项目间距、圆角等，
+ * 并应用ImGui的默认暗色配色方案。
+ */
 void SetModernDarkStyle() {
     ImGuiStyle& style = ImGui::GetStyle();
     style.WindowPadding = ImVec2(8, 8);
@@ -20,6 +35,15 @@ void SetModernDarkStyle() {
     ImGui::StyleColorsDark();
 }
 
+/**
+ * @brief 显示应用程序的左侧边栏。
+ *
+ * 边栏包含"主列表"和"我喜欢的音乐"选项，允许用户切换当前的播放列表视图。
+ *
+ * @param pos 边栏窗口的屏幕位置。
+ * @param size 边栏窗口的大小。
+ * @param currentView 当前活动的视图枚举引用，将根据用户选择进行更新。
+ */
 void ShowLeftSidebar(ImVec2 pos, ImVec2 size, ActiveView& currentView) {
     ImGui::SetNextWindowPos(pos);
     ImGui::SetNextWindowSize(size);
@@ -28,13 +52,29 @@ void ShowLeftSidebar(ImVec2 pos, ImVec2 size, ActiveView& currentView) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::Begin("Sidebar", nullptr, flags);
 
+    // 主列表选择按钮
     if (ImGui::Selectable(u8"主列表", currentView == ActiveView::Main)) { currentView = ActiveView::Main; }
+    // 我喜欢的音乐选择按钮
     if (ImGui::Selectable(u8"我喜欢的音乐", currentView == ActiveView::LikedSongs)) { currentView = ActiveView::LikedSongs; }
     
     ImGui::End();
     ImGui::PopStyleVar();
 }
 
+/**
+ * @brief 显示应用程序的播放器窗口。
+ *
+ * 播放器窗口显示当前播放的歌曲信息、播放控制（上一曲、播放/暂停、下一曲）、
+ * 播放进度条、音量控制和播放模式切换（顺序、单曲循环、随机）。
+ *
+ * @param audioState 对 `AudioState` 结构的引用，包含音频设备和当前播放状态。
+ * @param mainPlaylist 主播放列表的引用，用于在更新喜爱歌曲状态时保存配置。
+ * @param activePlaylist 当前活动的播放列表引用（主列表或喜爱列表）。
+ * @param volume 音量的引用，允许用户调整。
+ * @param progress 播放进度的引用，用于显示和控制歌曲播放位置。
+ * @param pos 播放器窗口的屏幕位置。
+ * @param size 播放器窗口的大小。
+ */
 void ShowPlayerWindow(AudioState& audioState, std::vector<Song>& mainPlaylist, std::vector<Song>& activePlaylist, float& volume, float progress, ImVec2 pos, ImVec2 size) {
     ImGui::SetNextWindowPos(pos);
     ImGui::SetNextWindowSize(size);
@@ -50,7 +90,7 @@ void ShowPlayerWindow(AudioState& audioState, std::vector<Song>& mainPlaylist, s
     }
     
     if (ImGui::BeginTable("PlayerLayout", 3, ImGuiTableFlags_SizingStretchSame)) {
-        // --- Left panel: Song Info ---
+        // --- 左侧面板: 歌曲信息 ---
         ImGui::TableNextColumn();
         {
             float artSize = size.y * 0.8f;
@@ -84,7 +124,7 @@ void ShowPlayerWindow(AudioState& audioState, std::vector<Song>& mainPlaylist, s
             ImGui::EndGroup();
         }
 
-        // --- Middle panel: Playback Controls ---
+        // --- 中间面板: 播放控制 ---
         ImGui::TableNextColumn();
         {
             float controlsHeight = ImGui::GetFrameHeight();
@@ -152,7 +192,7 @@ void ShowPlayerWindow(AudioState& audioState, std::vector<Song>& mainPlaylist, s
             ImGui::PopItemWidth();
         }
 
-        // --- Right panel: Volume and Modes ---
+        // --- 右侧面板: 音量和模式 ---
         ImGui::TableNextColumn();
         {
             float controlsHeight = ImGui::GetFrameHeight();
@@ -200,6 +240,20 @@ void ShowPlayerWindow(AudioState& audioState, std::vector<Song>& mainPlaylist, s
     ImGui::PopStyleVar(2);
 }
 
+/**
+ * @brief 显示播放列表窗口。
+ *
+ * 播放列表窗口根据当前视图（主列表或喜爱列表）显示歌曲列表。
+ * 在主列表视图下，还提供音乐目录管理功能（添加、移除、重新扫描）。
+ *
+ * @param audioState 对 `AudioState` 结构的引用，用于管理音频设备和当前播放状态。
+ * @param mainPlaylist 主播放列表的引用。
+ * @param likedPlaylist 喜爱歌曲播放列表的引用。
+ * @param musicDirs 音乐目录路径的向量引用，用于管理用户添加的音乐源目录。
+ * @param currentView 当前活动的视图枚举引用。
+ * @param pos 播放列表窗口的屏幕位置。
+ * @param size 播放列表窗口的大小。
+ */
 void ShowPlaylistWindow(AudioState& audioState, std::vector<Song>& mainPlaylist, std::vector<Song>& likedPlaylist, std::vector<std::string>& musicDirs, ActiveView currentView, ImVec2 pos, ImVec2 size) {
     ImGui::SetNextWindowPos(pos);
     ImGui::SetNextWindowSize(size);
