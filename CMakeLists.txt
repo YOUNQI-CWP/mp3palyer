@@ -42,5 +42,5 @@ target_link_libraries(mp3-player PRIVATE imgui)
 # 为主程序设置头文件目录
 # miniaudio 目录仍然是主程序需要的
 target_include_directories(mp3-player PRIVATE
-    miniaudio
+    vendor/miniaudio
 )
