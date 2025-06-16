@@ -17,16 +17,24 @@
 #define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio.h"
 
+// ======== Global Fonts ========
+ImFont* G_Font_Default = nullptr;
+ImFont* G_Font_Large = nullptr;
+
 // ======== Enums & Data Structures ========
 enum class PlayMode { ListLoop, RepeatOne, Shuffle };
 enum class ActiveView { Main, LikedSongs };
 enum class PlayDirection { New, Back };
 
+// ==================== MODIFICATION: ADD METADATA FIELDS ====================
 struct Song {
     std::string filePath;
     std::string displayName;
+    std::string artist; // 新增：艺术家
+    std::string album;  // 新增：专辑
     bool isLiked = false;
 };
+// =========================================================================
 
 struct AudioState {
     ma_decoder decoder;
@@ -58,7 +66,6 @@ int GetNextSongIndex(AudioState& audioState, int listSize);
 // ======== Audio, Config & Logic Functions ========
 
 void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
-    // 在这个回调函数中，pUserData 是一个指针，所以使用 -> 是正确的
     AudioState* audioState = (AudioState*)pDevice->pUserData;
     if (audioState == NULL) return;
     ma_mutex_lock(&audioState->mutex);
@@ -108,8 +115,6 @@ bool PlaySongAtIndex(AudioState& audioState, std::vector<Song>& playlist, int in
     const char* filePath = playlist[index].filePath.c_str();
     if (audioState.isDeviceInitialized) ma_device_uninit(&audioState.device);
 
-    // audioState 是一个引用 (reference)，不是指针 (pointer)。
-    // 访问它的成员变量 mutex 必须使用点号 '.'，而不是箭头 '->'。
     ma_mutex_lock(&audioState.mutex);
     
     if (audioState.isAudioReady) ma_decoder_uninit(&audioState.decoder);
@@ -137,7 +142,6 @@ bool PlaySongAtIndex(AudioState& audioState, std::vector<Song>& playlist, int in
     deviceConfig.dataCallback = data_callback;
     deviceConfig.pUserData = &audioState;
 
-    // 解锁，因为 ma_device_init 可能需要时间
     ma_mutex_unlock(&audioState.mutex);
 
     if (ma_device_init(NULL, &deviceConfig, &audioState.device) != MA_SUCCESS) {
@@ -211,6 +215,7 @@ void SetModernDarkStyle() {
     ImGui::StyleColorsDark();
 }
 
+// ==================== MODIFICATION: PARSE METADATA FROM FILENAME ====================
 void ScanDirectoryForMusic(const std::string& path, std::vector<Song>& playlist, const std::set<std::string>& likedPaths) {
     const std::set<std::string> supported_extensions = {".mp3", ".wav", ".flac"};
     try {
@@ -218,12 +223,44 @@ void ScanDirectoryForMusic(const std::string& path, std::vector<Song>& playlist,
             if (entry.is_regular_file()) {
                 std::string extension = entry.path().extension().string();
                 std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c){ return std::tolower(c); });
+
                 if (supported_extensions.count(extension)) {
                     std::string full_path = entry.path().string();
                     auto it = std::find_if(playlist.begin(), playlist.end(), [&](const Song& s){ return s.filePath == full_path; });
+
                     if (it == playlist.end()) {
-                        bool isLiked = likedPaths.count(full_path);
-                        playlist.push_back({full_path, entry.path().filename().string(), isLiked});
+                        Song newSong;
+                        newSong.filePath = full_path;
+                        newSong.isLiked = likedPaths.count(full_path);
+
+                        // --- 从文件名解析元数据 ---
+                        std::string filename = entry.path().stem().string(); // 获取不带扩展名的文件名
+                        std::stringstream ss(filename);
+                        std::string segment;
+                        std::vector<std::string> segments;
+                        while(std::getline(ss, segment, '-')) {
+                            // Trim whitespace
+                            size_t first = segment.find_first_not_of(' ');
+                            if (std::string::npos == first) continue;
+                            size_t last = segment.find_last_not_of(' ');
+                            segments.push_back(segment.substr(first, (last - first + 1)));
+                        }
+
+                        if (segments.size() >= 2) { // 格式: Artist - Title
+                            newSong.artist = segments[0];
+                            newSong.displayName = segments[1];
+                            newSong.album = "未知专辑"; // 默认
+                            if (segments.size() >= 3) { // 格式: Artist - Album - Title
+                                newSong.album = segments[1];
+                                newSong.displayName = segments[2];
+                            }
+                        } else { // 无法解析
+                            newSong.displayName = filename;
+                            newSong.artist = "未知艺术家";
+                            newSong.album = "未知专辑";
+                        }
+                        
+                        playlist.push_back(newSong);
                     }
                 }
             }
@@ -232,6 +269,7 @@ void ScanDirectoryForMusic(const std::string& path, std::vector<Song>& playlist,
         printf("Filesystem error: %s\n", e.what());
     }
 }
+// ===================================================================================
 
 // ======== Main Application ========
 int main(int, char**) {
@@ -257,14 +295,17 @@ int main(int, char**) {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
     const char* font_path = "font.ttf";
-    float font_size = 18.0f;
     if (std::filesystem::exists(font_path)) {
         ImFontConfig config;
-        io.Fonts->AddFontFromFileTTF(font_path, font_size, nullptr, io.Fonts->GetGlyphRangesDefault());
+        G_Font_Default = io.Fonts->AddFontFromFileTTF(font_path, 18.0f, nullptr, io.Fonts->GetGlyphRangesDefault());
+        
         config.MergeMode = true;
         static const ImWchar icon_ranges[] = { 0x2661, 0x2665, 0 }; // ♡ ♥
-        io.Fonts->AddFontFromFileTTF(font_path, font_size, &config, icon_ranges);
-        io.Fonts->AddFontFromFileTTF(font_path, font_size, &config, io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+        io.Fonts->AddFontFromFileTTF(font_path, 18.0f, &config, icon_ranges);
+        io.Fonts->AddFontFromFileTTF(font_path, 18.0f, &config, io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+
+        G_Font_Large = io.Fonts->AddFontFromFileTTF(font_path, 28.0f, nullptr, io.Fonts->GetGlyphRangesDefault());
+        io.Fonts->AddFontFromFileTTF(font_path, 28.0f, &config, io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
     } else {
         printf("WARNING: Font file '%s' not found. Please add it to the executable directory to see Chinese characters and icons.\n", font_path);
     }
@@ -321,7 +362,7 @@ int main(int, char**) {
         if (audioState.isDeviceInitialized) ma_device_set_master_volume(&audioState.device, volume);
 
         const ImGuiViewport* viewport = ImGui::GetMainViewport();
-        const float playerHeight = 90.0f;
+        const float playerHeight = 110.0f;
         const float leftSidebarWidth = 220.0f;
         ImVec2 playerPos = ImVec2(viewport->Pos.x, viewport->Pos.y + viewport->Size.y - playerHeight);
         ImVec2 playerSize = ImVec2(viewport->Size.x, playerHeight);
@@ -376,134 +417,171 @@ void ShowLeftSidebar(ImVec2 pos, ImVec2 size, ActiveView& currentView) {
     ImGui::PopStyleVar();
 }
 
+// ==================== MODIFICATION: ENTIRE ShowPlayerWindow FUNCTION REVAMPED ====================
 void ShowPlayerWindow(AudioState& audioState, std::vector<Song>& mainPlaylist, std::vector<Song>& activePlaylist, float& volume, float progress, ImVec2 pos, ImVec2 size) {
     ImGui::SetNextWindowPos(pos);
     ImGui::SetNextWindowSize(size);
     ImGuiWindowFlags player_flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse;
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 10.0f));
     ImGui::Begin("Player", nullptr, player_flags);
-    
-    std::string songName = "No Song Loaded";
-    Song* currentSongInMain = nullptr;
 
+    Song* currentSongInActive = nullptr;
     if (audioState.isAudioReady && audioState.currentIndex >= 0 && audioState.currentIndex < activePlaylist.size()) {
-        Song& currentSongInActive = activePlaylist[audioState.currentIndex];
-        songName = currentSongInActive.displayName;
-
-        auto it = std::find_if(mainPlaylist.begin(), mainPlaylist.end(), [&](const Song& s){
-            return s.filePath == currentSongInActive.filePath;
-        });
-        if (it != mainPlaylist.end()) {
-            currentSongInMain = &(*it);
-        }
+        currentSongInActive = &activePlaylist[audioState.currentIndex];
     }
+    
+    if (ImGui::BeginTable("PlayerLayout", 3, ImGuiTableFlags_SizingStretchSame)) {
+        // --- 左侧栏：歌曲信息 ---
+        ImGui::TableNextColumn();
+        {
+            float artSize = size.y * 0.8f;
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + artSize, p.y + artSize), IM_COL32(40, 40, 40, 255), 4.0f);
+            ImGui::Dummy(ImVec2(artSize, artSize));
+            
+            ImGui::SameLine(0, 10.0f);
 
-    ImGui::BeginGroup();
-    {
-        float artSize = size.y * 0.8f;
-        ImVec2 p = ImGui::GetCursorScreenPos();
-        ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + artSize, p.y + artSize), IM_COL32(40, 40, 40, 255));
-        ImGui::Dummy(ImVec2(artSize, artSize));
+            // 垂直居中对齐歌曲信息
+            float infoHeight = (G_Font_Large ? G_Font_Large->FontSize : 18.0f) + (G_Font_Default ? G_Font_Default->FontSize : 18.0f) + ImGui::GetStyle().ItemSpacing.y;
+            float infoOffsetY = (artSize - infoHeight) / 2.0f;
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + infoOffsetY);
+
+            ImGui::BeginGroup();
+            if (currentSongInActive) {
+                if (G_Font_Large) ImGui::PushFont(G_Font_Large);
+                ImGui::Text("%s", currentSongInActive->displayName.c_str());
+                if (G_Font_Large) ImGui::PopFont();
+                
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
+                ImGui::Text("%s - %s", currentSongInActive->artist.c_str(), currentSongInActive->album.c_str());
+                ImGui::PopStyleColor();
+            } else {
+                if (G_Font_Large) ImGui::PushFont(G_Font_Large);
+                ImGui::Text("No Song Loaded");
+                if (G_Font_Large) ImGui::PopFont();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
+                ImGui::Text("Unknown Artist - Unknown Album");
+                ImGui::PopStyleColor();
+            }
+            ImGui::EndGroup();
+        }
+
+        // --- 中间栏：播放控制 ---
+        ImGui::TableNextColumn();
+        {
+            float controlsHeight = ImGui::GetFrameHeight();
+            float sliderHeight = ImGui::GetFrameHeight();
+            float totalContentHeight = controlsHeight + sliderHeight + ImGui::GetStyle().ItemSpacing.y * 2;
+            
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (size.y - totalContentHeight) / 2.0f);
+
+            float controls_width = 150.0f; 
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (ImGui::GetContentRegionAvail().x - controls_width) / 2);
+            ImGui::BeginGroup();
+            if (ImGui::Button("<<", ImVec2(40, controlsHeight))) {
+                if (!audioState.playHistory.empty()) {
+                    int prevIndex = audioState.playHistory.back();
+                    audioState.playHistory.pop_back();
+                    PlaySongAtIndex(audioState, activePlaylist, prevIndex, PlayDirection::Back);
+                } else if (audioState.playMode == PlayMode::Shuffle && !activePlaylist.empty()) {
+                    PlaySongAtIndex(audioState, activePlaylist, GetNextSongIndex(audioState, activePlaylist.size()), PlayDirection::New);
+                } else if (!activePlaylist.empty()) {
+                    int prevIndex = (audioState.currentIndex - 1 + activePlaylist.size()) % activePlaylist.size();
+                    PlaySongAtIndex(audioState, activePlaylist, prevIndex, PlayDirection::New);
+                }
+            }
+            ImGui::SameLine();
+            bool isPlaying = audioState.isDeviceInitialized && ma_device_is_started(&audioState.device);
+            if (ImGui::Button(isPlaying ? "||" : ">", ImVec2(50, controlsHeight))) {
+                if (isPlaying) {
+                    ma_device_stop(&audioState.device);
+                    audioState.elapsedTimeAtPause += (float)(SDL_GetTicks() - audioState.songStartTime) / 1000.0f;
+                } else if(audioState.isDeviceInitialized) {
+                    ma_device_start(&audioState.device);
+                    audioState.songStartTime = SDL_GetTicks();
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button(">>", ImVec2(40, controlsHeight))) {
+                if (!activePlaylist.empty()) {
+                    PlaySongAtIndex(audioState, activePlaylist, GetNextSongIndex(audioState, activePlaylist.size()), PlayDirection::New);
+                }
+            }
+            ImGui::EndGroup();
+
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x * 0.1f);
+            ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.8f);
+            
+            float elapsed_seconds = progress * audioState.totalSongDurationSec;
+            char time_str_elapsed[16], time_str_total[16];
+            sprintf(time_str_elapsed, "%02d:%02d", (int)elapsed_seconds / 60, (int)elapsed_seconds % 60);
+            sprintf(time_str_total, "%02d:%02d", (int)audioState.totalSongDurationSec / 60, (int)audioState.totalSongDurationSec % 60);
+
+            ImGui::Text("%s", time_str_elapsed);
+            ImGui::SameLine();
+            if (ImGui::SliderFloat("##Progress", &progress, 0.0f, 1.0f, "")) {
+                if (audioState.isAudioReady) {
+                    ma_mutex_lock(&audioState.mutex);
+                    ma_uint64 targetFrame = (ma_uint64)(progress * audioState.totalSongDurationSec * audioState.decoder.outputSampleRate);
+                    ma_decoder_seek_to_pcm_frame(&audioState.decoder, targetFrame);
+                    audioState.elapsedTimeAtPause = progress * audioState.totalSongDurationSec;
+                    audioState.songStartTime = SDL_GetTicks();
+                    ma_mutex_unlock(&audioState.mutex);
+                }
+            }
+            ImGui::SameLine();
+            ImGui::Text("%s", time_str_total);
+            ImGui::PopItemWidth();
+        }
+
+        // --- 右侧栏：音量和模式 ---
+        ImGui::TableNextColumn();
+        {
+            float controlsHeight = ImGui::GetFrameHeight();
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (size.y - controlsHeight - ImGui::GetStyle().WindowPadding.y*2) / 2.0f);
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x * 0.1f);
+            ImGui::BeginGroup();
+            
+            Song* currentSongInMain = nullptr;
+            if (currentSongInActive) {
+                 auto it = std::find_if(mainPlaylist.begin(), mainPlaylist.end(), [&](const Song& s){ return s.filePath == currentSongInActive->filePath; });
+                 if (it != mainPlaylist.end()) currentSongInMain = &(*it);
+            }
+            if (currentSongInMain) {
+                const char* heartIcon = currentSongInMain->isLiked ? u8"♥" : u8"♡";
+                if (ImGui::Button(heartIcon)) {
+                    currentSongInMain->isLiked = !currentSongInMain->isLiked;
+                    SaveLikedSongs(mainPlaylist);
+                }
+                ImGui::SameLine();
+            }
+
+            const char* modeText = "";
+            switch (audioState.playMode) {
+                case PlayMode::ListLoop: modeText = u8"顺序"; break;
+                case PlayMode::RepeatOne: modeText = u8"单曲"; break;
+                case PlayMode::Shuffle: modeText = u8"随机"; break;
+            }
+            if (ImGui::Button(modeText)) {
+                int currentMode = (int)audioState.playMode;
+                audioState.playMode = (PlayMode)((currentMode + 1) % 3);
+                audioState.playHistory.clear();
+            }
+            ImGui::SameLine();
+            ImGui::PushItemWidth(150);
+            ImGui::SliderFloat("##Volume", &volume, 0.0f, 1.0f, u8"音量 %.2f");
+            ImGui::PopItemWidth();
+
+            ImGui::EndGroup();
+        }
+
+        ImGui::EndTable();
     }
-    ImGui::EndGroup();
-    ImGui::SameLine();
-
-    ImGui::BeginGroup();
-    {
-        ImGui::TextWrapped("%s", songName.c_str());
-        ImGui::SameLine();
-        if (currentSongInMain) {
-            const char* heartIcon = currentSongInMain->isLiked ? u8"♥" : u8"♡";
-            if (ImGui::Button(heartIcon)) {
-                currentSongInMain->isLiked = !currentSongInMain->isLiked;
-                SaveLikedSongs(mainPlaylist);
-            }
-        }
-
-        char time_str[32];
-        float elapsed_seconds = progress * audioState.totalSongDurationSec;
-        sprintf(time_str, "%02d:%02d / %02d:%02d", (int)elapsed_seconds / 60, (int)elapsed_seconds % 60, (int)audioState.totalSongDurationSec / 60, (int)audioState.totalSongDurationSec % 60);
-        float current_progress = progress;
-        ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.5f);
-        if (ImGui::SliderFloat("##Progress", &current_progress, 0.0f, 1.0f, "")) {
-            if (audioState.isAudioReady) {
-                ma_mutex_lock(&audioState.mutex);
-                ma_uint64 targetFrame = (ma_uint64)(current_progress * audioState.totalSongDurationSec * audioState.decoder.outputSampleRate);
-                ma_decoder_seek_to_pcm_frame(&audioState.decoder, targetFrame);
-                audioState.elapsedTimeAtPause = current_progress * audioState.totalSongDurationSec;
-                audioState.songStartTime = SDL_GetTicks();
-                ma_mutex_unlock(&audioState.mutex);
-            }
-        }
-        ImGui::PopItemWidth();
-        ImGui::SameLine();
-        ImGui::Text("%s", time_str);
-    }
-    ImGui::EndGroup();
-    ImGui::SameLine();
-
-    float controls_width = 250;
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (ImGui::GetContentRegionAvail().x - controls_width - 150) / 2);
-    ImGui::BeginGroup();
-    {
-        if (ImGui::Button("<<")) {
-            if (!audioState.playHistory.empty()) {
-                int prevIndex = audioState.playHistory.back();
-                audioState.playHistory.pop_back();
-                PlaySongAtIndex(audioState, activePlaylist, prevIndex, PlayDirection::Back);
-            }
-            else if (audioState.playMode == PlayMode::Shuffle && !activePlaylist.empty()) {
-                PlaySongAtIndex(audioState, activePlaylist, GetNextSongIndex(audioState, activePlaylist.size()), PlayDirection::New);
-            }
-            else if (!activePlaylist.empty()) {
-                int prevIndex = (audioState.currentIndex - 1 + activePlaylist.size()) % activePlaylist.size();
-                PlaySongAtIndex(audioState, activePlaylist, prevIndex, PlayDirection::New);
-            }
-        }
-
-        ImGui::SameLine();
-        bool isPlaying = audioState.isDeviceInitialized && ma_device_is_started(&audioState.device);
-        if (ImGui::Button(isPlaying ? "||" : ">")) {
-            if (isPlaying) {
-                ma_device_stop(&audioState.device);
-                audioState.elapsedTimeAtPause += (float)(SDL_GetTicks() - audioState.songStartTime) / 1000.0f;
-            } else if(audioState.isDeviceInitialized) {
-                ma_device_start(&audioState.device);
-                audioState.songStartTime = SDL_GetTicks();
-            }
-        }
-        ImGui::SameLine();
-
-        if (ImGui::Button(">>")) {
-            if (!activePlaylist.empty()) {
-                PlaySongAtIndex(audioState, activePlaylist, GetNextSongIndex(audioState, activePlaylist.size()), PlayDirection::New);
-            }
-        }
-
-        ImGui::SameLine();
-        const char* modeText = "";
-        switch (audioState.playMode) {
-            case PlayMode::ListLoop: modeText = u8"顺序播放"; break;
-            case PlayMode::RepeatOne: modeText = u8"单曲循环"; break;
-            case PlayMode::Shuffle: modeText = u8"随机播放"; break;
-        }
-        if (ImGui::Button(modeText)) {
-            int currentMode = (int)audioState.playMode;
-            audioState.playMode = (PlayMode)((currentMode + 1) % 3);
-            audioState.playHistory.clear();
-        }
-    }
-    ImGui::EndGroup();
-
-    ImGui::SameLine();
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - 150);
-    ImGui::PushItemWidth(140);
-    ImGui::SliderFloat("##Volume", &volume, 0.0f, 1.0f, "Volume: %.2f");
-    ImGui::PopItemWidth();
 
     ImGui::End();
-    ImGui::PopStyleVar();
+    ImGui::PopStyleVar(2);
 }
 
 void ShowPlaylistWindow(AudioState& audioState, std::vector<Song>& mainPlaylist, std::vector<Song>& likedPlaylist, std::vector<std::string>& musicDirs, ActiveView currentView, ImVec2 pos, ImVec2 size) {
@@ -561,13 +639,9 @@ void ShowPlaylistWindow(AudioState& audioState, std::vector<Song>& mainPlaylist,
     }
 
     ImGui::Text(u8"播放列表");
-    // ==================== MODIFICATION START ====================
-    // 1. 将表格列数从 3 改为 2
     if (ImGui::BeginTable("playlist_table", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable)) {
         ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoResize, 40.0f);
         ImGui::TableSetupColumn(u8"标题");
-        // 2. 移除爱心图标列的设置
-        // ImGui::TableSetupColumn(u8"♡", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoResize, 40.0f);
         ImGui::TableHeadersRow();
 
         ImGuiListClipper clipper;
@@ -587,24 +661,11 @@ void ShowPlaylistWindow(AudioState& audioState, std::vector<Song>& mainPlaylist,
                         PlaySongAtIndex(audioState, activePlaylist, i, PlayDirection::New);
                     }
                 }
-                
-                // 3. 移除渲染爱心图标按钮的整块代码
-                // ImGui::TableSetColumnIndex(2);
-                // const char* heartIcon = song.isLiked ? u8"♥" : u8"♡";
-                // ImGui::PushID(i);
-                // if (ImGui::Button(heartIcon)) {
-                //     song.isLiked = !song.isLiked;
-                //     auto it = std::find_if(mainPlaylist.begin(), mainPlaylist.end(), [&](const Song& s){ return s.filePath == song.filePath; });
-                //     if (it != mainPlaylist.end()) it->isLiked = song.isLiked;
-                //     SaveLikedSongs(mainPlaylist);
-                // }
-                // ImGui::PopID();
             }
         }
         clipper.End();
         ImGui::EndTable();
     }
-    // ==================== MODIFICATION END ====================
     
     ImGui::End();
     ImGui::PopStyleVar();
