@@ -38,12 +38,15 @@ target_include_directories(mp3-player PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/miniaudio
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/imgui
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/imgui/backends
+    ${SDL2_INCLUDE_DIRS}
 )
 
 # 链接所需的库
 target_link_libraries(mp3-player PRIVATE 
-    SDL2::SDL2
+    ${SDL2_LIBRARIES}
     OpenGL::GL
+    dl
+    pthread
 )
 
 # 为Windows平台添加特定设置

@@ -118,6 +118,82 @@
 -   **音频处理**: miniaudio
 -   **文件系统操作**: C++17 `std::filesystem`
 
+### 项目架构
+
+```mermaid
+graph TD
+    subgraph "用户交互"
+        A[用户]
+    end
+
+    subgraph "核心应用"
+        B(音乐播放器应用)
+        B --> C[C++17]
+    end
+
+    subgraph "图形与UI"
+        D[SDL2]
+        E[OpenGL]
+        F[Dear ImGui]
+    end
+
+    subgraph "音频处理"
+        G[miniaudio]
+    end
+
+    subgraph "数据管理"
+        H[C++17 Filesystem]
+        I[config.txt]
+        J[liked_songs.txt]
+    end
+
+    A --> B
+    B --> D
+    B --> E
+    B --> F
+    F -- 后端 --> D
+    F -- 后端 --> E
+    B --> G
+    B --> H
+    H <--> I
+    H <--> J
+
+    style B fill:#f9f,stroke:#333,stroke-width:2px
+    style F fill:#9cf,stroke:#333,stroke-width:2px
+    style G fill:#9cf,stroke:#333,stroke-width:2px
+```
+
+### 执行流程
+
+```mermaid
+graph TD
+    A[应用程序启动] --> B{初始化}; 
+    B --> C[加载字体和设置ImGui风格];
+    B --> D[加载配置文件];
+
+    subgraph "主UI线程"
+        E[主循环] --> F[渲染左侧边栏];
+        E --> G[渲染播放器控制区];
+        E --> H[渲染播放列表区];
+        F --> I{用户交互/事件处理};
+        G --> I;
+        H --> I;
+        I --> J{更新AudioState}; 
+        J -- 互斥锁保护 --> K[调用miniaudio API];
+        I --> L[文件系统操作];
+    end
+
+    subgraph "miniaudio音频线程"
+        M[miniaudio内部音频线程] --> N[data_callback函数];
+        N -- 互斥锁保护 --> O[从ma_decoder读取音频数据];
+        O --> P[填充到输出缓冲区];
+    end
+
+    K -- 数据同步 --> N;
+    L -- 数据持久化 --> Q[config.txt / liked_songs.txt];
+    Q -- 数据读取 --> D;
+```
+
 ## 核心逻辑
 
 ### 线程处理
