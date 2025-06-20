@@ -94,6 +94,16 @@ bool PlaySongAtIndex(AudioState& audioState, std::vector<Song>& playlist, int in
         printf("Error: Playlist is empty or index is out of bounds.\n");
         return false;
     }
+    
+    // +++ 新增代码：播放歌曲前先播报提示音 +++
+    // 为了更好的用户体验，仅在播放新歌或下一首时播报，返回上一首时不播报
+    if (direction != PlayDirection::Back) {
+        const Song& songToAnnounce = playlist[index];
+        // 调用在 main.cpp 中定义，在 audio.h 中声明的函数
+        // 该函数是阻塞的，会等待播报结束后再继续执行后续代码
+        playSongAnnouncement(songToAnnounce);
+    }
+    // --- 新增代码结束 ---
 
     // 如果是新播放并且当前有歌曲正在播放，则将当前歌曲添加到播放历史中
     if (direction == PlayDirection::New && audioState.currentIndex != -1) {

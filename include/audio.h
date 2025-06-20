@@ -49,3 +49,5 @@ bool PlaySongAtIndex(AudioState& audioState, std::vector<Song>& playlist, int in
  * @return 下一首歌曲的索引。如果播放列表为空，则返回-1。
  */
 int GetNextSongIndex(AudioState& audioState, int listSize);
+
+bool playSongAnnouncement(const Song& song);

@@ -38,8 +38,8 @@ target_include_directories(mp3-player PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/miniaudio
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/imgui
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/imgui/backends
+    ${CMAKE_CURRENT_SOURCE_DIR}/vendor/iflyteksdk
     ${SDL2_INCLUDE_DIRS}
-    ${CMAKE_CURRENT_SOURCE_DIR}/iflytek_tts_sdk/include
 )
 
 target_link_libraries(mp3-player PRIVATE 
@@ -47,7 +47,7 @@ target_link_libraries(mp3-player PRIVATE
     OpenGL::GL
     dl
     pthread
-    ${CMAKE_CURRENT_SOURCE_DIR}/iflytek_tts_sdk/libs/libSparkChain.so
+    ${CMAKE_CURRENT_SOURCE_DIR}/libs/libSparkChain.so
 )
 
 # 为Windows平台添加特定设置

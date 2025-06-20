@@ -12,6 +12,7 @@
 #include <vector>
 #include <set>
 #include <filesystem>
+#include <thread> // 为了线程安全播放欢迎音
 
 #include <SDL.h>
 #include <SDL_opengl.h>
@@ -29,6 +30,115 @@
 #include "files.h"
 #include "ui.h"
 
+#include <iostream>
+#include <string>
+#include <atomic>
+#include <fstream>
+#include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include "sparkchain.h"
+#include "sc_tts.h"
+
+using namespace SparkChain;
+using namespace std;
+
+// --- 全局区域 ---
+// 异步状态标志，用于在异步转同步时等待结果
+static atomic_bool finish(false);
+
+// SDK 初始化参数 (请替换为您自己的)
+const char *APPID     = "894244c6";
+const char *APIKEY    = "97fc61dbeea347213ec7db4d37e15e46";
+const char *APISECRET = "YjgwZWMzM2M2NGI2OWVmZDY0MmNiMjFk";
+const char *WORKDIR   = "./";
+int logLevel          = 100; // 100 表示关闭日志
+
+// --- 核心组件 ---
+
+/**
+ * @brief 回调处理类，用于接收SDK返回的音频数据和错误信息
+ * 通过 usrTag 机制，每次回调都能获取对应的文件路径，实现了无状态可重入
+ */
+class onlineTTSCallbacks : public TTSCallbacks {
+    void onResult(TTSResult * result, void * usrTag) override {
+        const char* currentAudioPath = static_cast<const char*>(usrTag);
+        const char * data = result->data();
+        int len           = result->len();
+        int status        = result->status();
+
+        FILE* file = fopen(currentAudioPath, "ab"); // 以二进制追加模式写入
+        if (file) {
+            fwrite(data, 1, len, file);
+            fclose(file);
+        }
+
+        if (status == 2) { // status=2 表示这是最后的数据块，合成完成
+            finish = true; // 通知主线程任务已完成
+        }
+    }
+
+    void onError(TTSError * error, void * usrTag) override {
+        printf("请求出错, 错误码: %d, 错误信息:%s\n", error->code(), error->errMsg().c_str());
+        finish = true; // 即使出错也要通知主线程，避免无限等待
+    }
+};
+
+
+/**
+ * @brief (您想要的函数) 将文本转换为语音并保存到指定文件
+ * 这是一个完全封装的函数，调用即可完成单次转换。
+ *
+ * @param text 要合成的文本 (UTF-8编码)
+ * @param outputPath 生成的音频文件保存路径 (例如 "./hello.mp3")
+ * @param vcn 发音人，默认为 "讯飞小燕"
+ * @return bool true 表示合成流程成功结束, false 表示请求失败或超时
+ */
+bool Text_to_TTS(const char* text, const char* outputPath, const char* vcn = "xiaoyan") {
+    // --- 1. 函数内部准备 ---
+    OnlineTTS tts(vcn);           // 创建TTS引擎，可指定发音人
+    tts.aue("lame");              // 设置音频编码为mp3
+    onlineTTSCallbacks cbs{};     // 创建回调处理器
+    tts.registerCallbacks(&cbs);  // 注册回调
+
+    // --- 2. 核心逻辑 ---
+    remove(outputPath); // 删除旧文件，确保从零开始
+    finish = false;     // 重置等待标志
+
+    printf("开始合成: \"%s\" -> %s\n", text, outputPath);
+
+    // 发起异步请求，并将 outputPath 作为用户自定义数据(usrTag)传入
+    int ret = tts.arun(text, (void*)outputPath);
+    if (ret != 0) {
+        printf("合成请求发送失败, 错误码: %d\n", ret);
+        return false;
+    }
+
+    // --- 3. 等待结果 ---
+    int times = 0;
+    while (!finish) {
+        sleep(1);
+        if (times++ > 20) { // 超时设置为20秒
+            printf("合成超时！\n");
+            return false;
+        }
+    }
+    printf("合成流程结束。\n");
+    return true;
+}
+
+
+// --- SDK 初始化与反初始化 (保持不变) ---
+int initSDK() {
+    SparkChainConfig *config = SparkChainConfig::builder();
+    config->appID(APPID)->apiKey(APIKEY)->apiSecret(APISECRET)->workDir(WORKDIR)->logLevel(logLevel);
+    return SparkChain::init(config);
+}
+
+void uninitSDK() {
+    SparkChain::unInit();
+}
+
 /**
  * @brief 全局默认字体。
  *
@@ -43,6 +153,123 @@ ImFont* G_Font_Default = nullptr;
 ImFont* G_Font_Large = nullptr;
 
 /**
+ * @brief 在单独的线程中播放欢迎音的函数。
+ * 此函数会初始化一个独立的miniaudio引擎和sound对象，
+ * 播放指定音频，并等待其播放完成后再清理资源。
+ * @param path 音频文件路径
+ */
+void playWelcomeSound(const char* path) {
+    if (!std::filesystem::exists(path)) {
+        printf("Welcome sound file not found: %s\n", path);
+        return;
+    }
+
+    ma_engine engine;
+    ma_result result = ma_engine_init(NULL, &engine);
+    if (result != MA_SUCCESS) {
+        printf("Failed to initialize welcome audio engine.\n");
+        return;
+    }
+
+    ma_sound sound;
+    // 使用 ma_sound 从文件初始化，这允许我们之后检查它的状态
+    result = ma_sound_init_from_file(&engine, path, 0, NULL, NULL, &sound);
+    if (result != MA_SUCCESS) {
+        printf("Failed to init welcome sound from file: %s\n", path);
+        ma_engine_uninit(&engine); // 初始化sound失败也要释放引擎
+        return;
+    }
+
+    ma_sound_start(&sound);
+
+    // 循环等待，直到声音播放结束
+    // ma_sound_at_end() 是检查声音是否播放完毕的正确方法
+    while (ma_sound_at_end(&sound) == MA_FALSE) {
+        ma_sleep(100); // 休眠100毫秒，避免CPU空转
+    }
+
+    // 播放完毕，清理资源
+    ma_sound_uninit(&sound);
+    ma_engine_uninit(&engine);
+}
+
+
+// +++ 已修正的功能函数 +++
+/**
+ * @brief 生成并播放歌曲开始前的播报提示音。
+ * 该函数会根据歌曲信息生成一段TTS语音，如“现在为您播放由[歌手]演唱的[歌曲]”。
+ * 语音文件会保存在程序运行目录下的 "tts_cache" 文件夹中。
+ * 如果提示音已存在，则直接播放。播放过程是阻塞的，直到提示音播放完毕。
+ *
+ * @param song 要播放的歌曲对象，需要包含 artist, displayName 成员。
+ * @return bool true 表示提示音播放成功, false 表示失败。
+ */
+bool playSongAnnouncement(const Song& song) {
+    // 1. 构造播报文本和目标文件名
+    if (song.artist.empty() || song.displayName.empty()) {
+        printf("Error: Song object is missing artist or displayName.\n");
+        return false;
+    }
+
+    std::string announcementText = "现在为您播放由" + song.artist + "演唱的" + song.displayName;
+    
+    // +++ 路径修改逻辑 +++
+    // 1. 定义一个专门存放提示音的目录
+    const std::string cacheDir = "tts_cache";
+    
+    // 2. 确保这个目录存在，如果不存在就创建它
+    if (!std::filesystem::exists(cacheDir)) {
+        std::filesystem::create_directory(cacheDir);
+    }
+
+    // 3. 基于歌曲信息创建一个不会重复且合法的文件名
+    std::string tipFileName = song.artist + "-" + song.displayName + "-tip.mp3";
+
+    // 4. 将目录和文件名组合成最终路径
+    std::string tipFilePath = (std::filesystem::path(cacheDir) / tipFileName).string();
+    // --- 路径修改逻辑结束 ---
+
+    // 2. 检查提示音文件是否存在，不存在则调用TTS生成
+    if (!std::filesystem::exists(tipFilePath)) {
+        printf("Tip sound not found, generating: %s\n", tipFilePath.c_str());
+        // Text_to_TTS 是阻塞的，会等待文件生成完毕
+        bool success = Text_to_TTS(announcementText.c_str(), tipFilePath.c_str());
+        if (!success) {
+            printf("Failed to generate tip sound.\n");
+            return false; // 生成失败，直接返回
+        }
+    }
+
+    // 3. 阻塞式播放提示音
+    printf("Playing tip sound: %s\n", tipFilePath.c_str());
+    ma_engine engine;
+    if (ma_engine_init(NULL, &engine) != MA_SUCCESS) {
+        printf("Failed to initialize tip audio engine.\n");
+        return false;
+    }
+
+    ma_sound sound;
+    if (ma_sound_init_from_file(&engine, tipFilePath.c_str(), 0, NULL, NULL, &sound) != MA_SUCCESS) {
+        printf("Failed to init tip sound from file: %s\n", tipFilePath.c_str());
+        ma_engine_uninit(&engine);
+        return false;
+    }
+    
+    ma_sound_start(&sound);
+    while (ma_sound_at_end(&sound) == MA_FALSE) {
+        ma_sleep(100); // 循环等待直到声音播放结束
+    }
+
+    ma_sound_uninit(&sound);
+    ma_engine_uninit(&engine);
+    
+    printf("Tip sound finished.\n");
+    return true;
+}
+// --- 功能函数结束 ---
+
+
+/**
  * @brief 应用程序的入口点。
  *
  * 初始化所有必要的库，设置应用程序窗口和渲染上下文，
@@ -54,24 +281,21 @@ ImFont* G_Font_Large = nullptr;
  */
 int main(int, char**) {
     // 1. 初始化 SDL
-    /**
-     * @brief 初始化SDL子系统。
-     *
-     * 初始化视频、定时器和游戏控制器子系统。如果初始化失败，则打印错误并退出。
-     */
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_GAMECONTROLLER) != 0) {
         printf("Error: %s\n", SDL_GetError());
         return -1;
     }
 
+    if (initSDK() != 0) {
+        printf("SDK 初始化失败!\n");
+        return -1;
+    }
+
+    // 在一个独立的线程中播放欢迎音，不阻塞主程序启动
+    std::thread welcomeThread(playWelcomeSound, "res/welcome.mp3");
+    welcomeThread.detach(); // 分离线程，让它在后台自由运行
+
     // 2. 设置 OpenGL
-    /**
-     * @brief 配置OpenGL上下文。
-     *
-     * 设置GLSL版本、OpenGL上下文标志、配置文件掩码、主次版本，
-     * 并启用双缓冲、深度缓冲区和模板缓冲区。
-     * 创建SDL窗口和OpenGL上下文，并使其成为当前上下文。
-     */
     const char* glsl_version = "#version 130";
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, 0);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
@@ -87,23 +311,12 @@ int main(int, char**) {
     SDL_GL_SetSwapInterval(1); // 启用垂直同步
 
     // 3. 设置 Dear ImGui
-    /**
-     * @brief 初始化Dear ImGui。
-     *
-     * 创建ImGui上下文并配置ImGuiIO，例如启用键盘导航。
-     */
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard; // 启用键盘导航
 
     // 4. 加载字体
-    /**
-     * @brief 加载应用程序使用的字体。
-     *
-     * 检查 `font.ttf` 文件是否存在。如果存在，则加载默认字体、带有图标的合并字体以及简体中文范围的字体。
-     * 如果文件不存在，则打印警告信息。
-     */
     const char* font_path = "font.ttf";
     if (std::filesystem::exists(font_path)) {
         ImFontConfig config;
@@ -121,26 +334,11 @@ int main(int, char**) {
     }
     
     // 5. 设置风格和后端
-    /**
-     * @brief 设置UI风格并初始化ImGui后端。
-     *
-     * 调用 `SetModernDarkStyle()` 函数设置现代暗色风格。
-     * 为SDL2和OpenGL3初始化ImGui后端。
-     */
     SetModernDarkStyle();
     ImGui_ImplSDL2_InitForOpenGL(window, gl_context);
     ImGui_ImplOpenGL3_Init(glsl_version);
 
     // 6. 初始化应用程序状态
-    /**
-     * @brief 初始化应用程序的音频状态、播放列表和配置。
-     *
-     * 初始化 `AudioState` 结构体和其互斥锁。
-     * 设置默认音量。
-     * 初始化主播放列表、喜爱歌曲播放列表、音乐目录和喜爱歌曲路径集合。
-     * 加载配置和喜爱歌曲。
-     * 扫描音乐目录以填充主播放列表。
-     */
     AudioState audioState;
     if (ma_mutex_init(&audioState.mutex) != MA_SUCCESS) return -1;
 
@@ -159,15 +357,6 @@ int main(int, char**) {
     }
     
     // 7. 主循环
-    /**
-     * @brief 应用程序的主事件循环。
-     *
-     * 循环处理SDL事件、更新音频播放状态和UI显示进度。
-     * 在每帧开始时更新ImGui框架，设置主音量。
-     * 根据视口大小定义UI布局。
-     * 渲染左侧边栏、播放列表窗口和播放器窗口。
-     * 最后渲染ImGui绘制数据并交换窗口缓冲区。
-     */
     bool done = false; // 循环控制标志
     while (!done) {
         SDL_Event event;
@@ -230,13 +419,6 @@ int main(int, char**) {
     }
 
     // 8. 清理
-    /**
-     * @brief 清理所有分配的资源。
-     *
-     * 取消初始化音频设备、解码器和互斥锁。
-     * 关闭ImGui后端，销毁ImGui上下文，销毁OpenGL上下文和SDL窗口。
-     * 最后退出SDL。
-     */
     if (audioState.isDeviceInitialized) ma_device_uninit(&audioState.device); // 取消初始化音频设备
     ma_mutex_lock(&audioState.mutex);
     if (audioState.isAudioReady) ma_decoder_uninit(&audioState.decoder); // 取消初始化解码器
@@ -248,6 +430,7 @@ int main(int, char**) {
     ImGui::DestroyContext(); // 销毁ImGui上下文
     SDL_GL_DeleteContext(gl_context); // 删除OpenGL上下文
     SDL_DestroyWindow(window); // 销毁SDL窗口
+    uninitSDK(); // 程序退出前，释放SDK资源
     SDL_Quit(); // 退出SDL
     return 0;
 }
