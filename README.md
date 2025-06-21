@@ -187,37 +187,60 @@ graph TD
 
 ```mermaid
 graph TD
-    A[应用程序启动] --> B{初始化阶段};
+    %% 初始化阶段
+    A[应用程序启动] --> B(初始化核心组件);
     B --> C[初始化SDL/OpenGL/ImGui];
     B --> D[初始化miniaudio];
-    B --> E[初始化TTS SDK];
-    B --> F[加载配置/字体];
-    B --> G(启动欢迎音线程);
-    
-    subgraph "主UI/事件循环"
-        H[主循环] --> I[处理用户事件];
-        H --> J[渲染UI帧];
-        I -- 播放歌曲请求 --> K{调用 PlaySongAtIndex};
-        K --> L[检查当前播放状态];
-        L -- 歌曲切换 --> M[调用 playSongAnnouncement];
-        M --> N{TTS缓存是否存在?};
-        N -- 否 --> O[调用讯飞SDK合成音频];
-        O --> P[保存到tts_cache];
-        N -- 是 --> P;
-        P -- 阻塞等待 --> Q[播放TTS提示音 (miniaudio)];
-        Q --> R[加载并播放选定歌曲];
-        J --> H;
+    B --> E[初始化讯飞TTS SDK];
+    B --> F[加载用户配置/字体];
+    B --> G_INIT_DONE{初始化完成};
+
+    %% 欢迎音线程 (独立于主UI，后台执行)
+    G_INIT_DONE -- 启动后立即 --> H_WELCOME_THREAD((启动欢迎音线程));
+    subgraph "欢迎音模块"
+        H_WELCOME_THREAD --> I_PLAY_WELCOME[播放 res/welcome.mp3];
+        I_PLAY_WELCOME --> J_THREAD_EXIT[线程自动结束];
     end
-    
-    subgraph "miniaudio音频回调线程"
-        S[miniaudio数据回调 (data_callback)] <--> R;
-        S -- 获取音频数据 --> T[解码器];
+
+    %% 主UI/事件循环
+    G_INIT_DONE --> K_MAIN_LOOP_START(进入主UI/事件循环);
+    subgraph "主UI/事件处理线程"
+        K_MAIN_LOOP_START --> L_EVENT_POLL[循环: 处理SDL事件/用户输入];
+        L_EVENT_POLL --> M_IMGUI_RENDER[渲染ImGui界面];
+        L_EVENT_POLL -- 用户操作: 播放歌曲 --> N_CALL_PLAY_SONG{调用 PlaySongAtIndex(index)};
+        N_CALL_PLAY_SONG --> O_PREPARE_ANNOUNCEMENT[检查/生成歌曲播报提示音];
+        
+        O_PREPARE_ANNOUNCEMENT --> P_TTS_CACHE_CHECK{TTS缓存是否存在?};
+        P_TTS_CACHE_CHECK -- 否 --> Q_TTS_GENERATE[调用讯飞SDK合成TTS音频];
+        Q_TTS_GENERATE --> R_SAVE_TTS_CACHE[保存到 tts_cache/];
+        P_TTS_CACHE_CHECK -- 是 --> R_SAVE_TTS_CACHE; 
+        
+        R_SAVE_TTS_CACHE -- 阻塞主线程等待 --> S_PLAY_TTS_ANNOUNCE[播放TTS提示音 (miniaudio)];
+        S_PLAY_TTS_ANNOUNCE --> T_LOAD_SONG[加载选定歌曲数据];
+        T_LOAD_SONG --> U_START_SONG_PLAYBACK[启动歌曲播放 (通过miniaudio)];
+        
+        U_START_SONG_PLAYBACK -- miniaudio内部 --> V_AUDIO_THREAD_CALL((miniaudio音频回调线程));
+        
+        M_IMGUI_RENDER --> L_EVENT_POLL; %% UI渲染后继续事件循环
     end
-    
-    subgraph "独立欢迎音线程"
-       G --> U[播放 welcome.mp3];
-       U --> V[线程结束/退出];
+
+    %% miniaudio音频线程 (由miniaudio内部管理)
+    subgraph "miniaudio音频处理线程"
+        V_AUDIO_THREAD_CALL --> W_DATA_CALLBACK[miniaudio数据回调 (ma_data_callback)];
+        W_DATA_CALLBACK -- 从解码器拉取 --> X_AUDIO_DECODE[解码音频数据];
+        X_AUDIO_DECODE -- 发送至 --> Y_AUDIO_DEVICE[音频输出设备];
+        W_DATA_CALLBACK -- (循环) --> W_DATA_CALLBACK;
     end
+
+    %% 数据流/控制流备注
+    style A fill:#f9f,stroke:#333,stroke-width:2px
+    style B fill:#f9f,stroke:#333,stroke-width:2px
+    style N_CALL_PLAY_SONG fill:#9cf,stroke:#333,stroke-width:2px
+    style S_PLAY_TTS_ANNOUNCE fill:#9cf,stroke:#333,stroke-width:2px
+    style U_START_SONG_PLAYBACK fill:#9cf,stroke:#333,stroke-width:2px
+    style H_WELCOME_THREAD fill:#c9f,stroke:#333,stroke-width:2px
+    style V_AUDIO_THREAD_CALL fill:#c9f,stroke:#333,stroke-width:2px
+    style W_DATA_CALLBACK fill:#c9f,stroke:#333,stroke-width:2px
 ```
 
 ## 核心逻辑
