@@ -187,60 +187,50 @@ graph TD
 
 ```mermaid
 graph TD
-    %% 初始化阶段
+    %% 应用程序启动和初始化
     A[应用程序启动] --> B(初始化核心组件);
     B --> C[初始化SDL/OpenGL/ImGui];
     B --> D[初始化miniaudio];
     B --> E[初始化讯飞TTS SDK];
-    B --> F[加载用户配置/字体];
-    B --> G_INIT_DONE{初始化完成};
-
-    %% 欢迎音线程 (独立于主UI，后台执行)
-    G_INIT_DONE -- 启动后立即 --> H_WELCOME_THREAD((启动欢迎音线程));
-    subgraph "欢迎音模块"
-        H_WELCOME_THREAD --> I_PLAY_WELCOME[播放 res/welcome.mp3];
-        I_PLAY_WELCOME --> J_THREAD_EXIT[线程自动结束];
-    end
+    B --> F[加载配置/字体/资源];
+    F --> G[启动欢迎音播放线程];
 
     %% 主UI/事件循环
-    G_INIT_DONE --> K_MAIN_LOOP_START(进入主UI/事件循环);
-    subgraph "主UI/事件处理线程"
-        K_MAIN_LOOP_START --> L_EVENT_POLL[循环: 处理SDL事件/用户输入];
-        L_EVENT_POLL --> M_IMGUI_RENDER[渲染ImGui界面];
-        L_EVENT_POLL -- 用户操作: 播放歌曲 --> N_CALL_PLAY_SONG{调用 PlaySongAtIndex(index)};
-        N_CALL_PLAY_SONG --> O_PREPARE_ANNOUNCEMENT[检查/生成歌曲播报提示音];
-        
-        O_PREPARE_ANNOUNCEMENT --> P_TTS_CACHE_CHECK{TTS缓存是否存在?};
-        P_TTS_CACHE_CHECK -- 否 --> Q_TTS_GENERATE[调用讯飞SDK合成TTS音频];
-        Q_TTS_GENERATE --> R_SAVE_TTS_CACHE[保存到 tts_cache/];
-        P_TTS_CACHE_CHECK -- 是 --> R_SAVE_TTS_CACHE; 
-        
-        R_SAVE_TTS_CACHE -- 阻塞主线程等待 --> S_PLAY_TTS_ANNOUNCE[播放TTS提示音 (miniaudio)];
-        S_PLAY_TTS_ANNOUNCE --> T_LOAD_SONG[加载选定歌曲数据];
-        T_LOAD_SONG --> U_START_SONG_PLAYBACK[启动歌曲播放 (通过miniaudio)];
-        
-        U_START_SONG_PLAYBACK -- miniaudio内部 --> V_AUDIO_THREAD_CALL((miniaudio音频回调线程));
-        
-        M_IMGUI_RENDER --> L_EVENT_POLL; %% UI渲染后继续事件循环
-    end
+    G --> H[进入主UI/事件循环];
+    H --> I[循环: 处理用户事件];
+    H --> J[循环: 渲染UI界面];
 
-    %% miniaudio音频线程 (由miniaudio内部管理)
-    subgraph "miniaudio音频处理线程"
-        V_AUDIO_THREAD_CALL --> W_DATA_CALLBACK[miniaudio数据回调 (ma_data_callback)];
-        W_DATA_CALLBACK -- 从解码器拉取 --> X_AUDIO_DECODE[解码音频数据];
-        X_AUDIO_DECODE -- 发送至 --> Y_AUDIO_DEVICE[音频输出设备];
-        W_DATA_CALLBACK -- (循环) --> W_DATA_CALLBACK;
-    end
+    %% 用户播放歌曲流程 (在主UI线程触发)
+    I -- 用户选择播放歌曲 --> K[调用 PlaySongAtIndex];
+    K --> L[检查并准备歌曲播报提示音];
+    L --> M{TTS缓存是否存在?};
+    M -- 否 --> N[调用讯飞SDK合成TTS音频];
+    N --> O[保存TTS音频到tts_cache];
+    M -- 是 --> O;
+    O -- 阻塞等待 --> P[播放TTS提示音 (miniaudio)];
+    P --> Q[加载并准备选定歌曲];
+    Q --> R[启动选定歌曲播放 (miniaudio)];
 
-    %% 数据流/控制流备注
-    style A fill:#f9f,stroke:#333,stroke-width:2px
-    style B fill:#f9f,stroke:#333,stroke-width:2px
-    style N_CALL_PLAY_SONG fill:#9cf,stroke:#333,stroke-width:2px
-    style S_PLAY_TTS_ANNOUNCE fill:#9cf,stroke:#333,stroke-width:2px
-    style U_START_SONG_PLAYBACK fill:#9cf,stroke:#333,stroke-width:2px
-    style H_WELCOME_THREAD fill:#c9f,stroke:#333,stroke-width:2px
-    style V_AUDIO_THREAD_CALL fill:#c9f,stroke:#333,stroke-width:2px
-    style W_DATA_CALLBACK fill:#c9f,stroke:#333,stroke-width:2px
+    %% miniaudio音频数据回调 (独立线程)
+    R -- 音频播放触发 --> S[miniaudio数据回调 (data_callback)];
+    S --> T[从解码器拉取音频数据];
+    T --> U[将数据送至音频设备];
+    S -- 继续 --> S; %% 循环拉取
+
+    %% 欢迎音播放线程 (独立于主UI线程)
+    G -- 异步执行 --> V[欢迎音线程: 播放 res/welcome.mp3];
+    V --> W[欢迎音线程结束];
+
+    %% 主循环继续
+    J --> H; %% UI渲染完成后返回主循环
+
+    %% 关键流程说明
+    subgraph "核心线程示意"
+        X[主UI/事件线程] -- 启动/调用 --> Y[TTS模块];
+        Y -- 调用/控制 --> Z[miniaudio播放];
+        X -- 异步启动 --> AA[欢迎音线程];
+        Z -- 内部回调 --> BB[miniaudio回调线程];
+    end
 ```
 
 ## 核心逻辑
